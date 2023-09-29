@@ -1,4 +1,4 @@
-![alt tag](https://raw.githubusercontent.com/jchristn/TaskHandler/master/assets/icon.ico)
+![alt tag](https://raw.githubusercontent.com/jchristn/TaskHandler/main/Assets/logo.png)
 
 # TaskHandler
 
