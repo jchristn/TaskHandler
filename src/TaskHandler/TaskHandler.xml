@@ -1,0 +1,165 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>TaskHandler</name>
+    </assembly>
+    <members>
+        <member name="T:TaskHandler.TaskDetails">
+            <summary>
+            Task details.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.Guid">
+            <summary>
+            GUID.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.Name">
+            <summary>
+            User-supplied name.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.Metadata">
+            <summary>
+            User-supplied metadata.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.Action">
+            <summary>
+            Action.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.Task">
+            <summary>
+            Task.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.TokenSource">
+            <summary>
+            Token source.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.Token">
+            <summary>
+            Token.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskDetails.#ctor">
+            <summary>
+            Instantiate.
+            </summary>
+        </member>
+        <member name="T:TaskHandler.TaskQueue">
+            <summary>
+            Task queue.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.Logger">
+            <summary>
+            Method to invoke to send log messages.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.MaxConcurrentTasks">
+            <summary>
+            Maximum number of concurrent tasks.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.RunningCount">
+            <summary>
+            Number of running tasks.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.RunningTasks">
+            <summary>
+            Running tasks dictionary.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.QueuedTasks">
+            <summary>
+            Queue containing tasks waiting to be started.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.OnTaskAdded">
+            <summary>
+            Event to fire when a task is added.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.OnTaskStarted">
+            <summary>
+            Event to fire when a task is started.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.OnTaskCanceled">
+            <summary>
+            Event to fire when a task is canceled.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.OnTaskFaulted">
+            <summary>
+            Event to fire when a task is faulted.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.OnTaskFinished">
+            <summary>
+            Event to fire when a task is finished.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.OnProcessingStarted">
+            <summary>
+            Event to fire when processing starts.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.OnProcessingStopped">
+            <summary>
+            Event to fire when processing stops.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.IsRunning">
+            <summary>
+            Boolean to indicate whether or not the task runner is running.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.IterationDelayMs">
+            <summary>
+            Iteration delay when checking for additional tasks to run.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.#ctor(System.Int32)">
+            <summary>
+            Instantiate.
+            </summary>
+            <param name="maxConcurrentTasks">Maximum concurrent tasks.</param>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.Dispose">
+            <summary>
+            Dispose.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.AddTask(System.Guid,System.String,System.Collections.Generic.Dictionary{System.String,System.Object},System.Action{System.Threading.CancellationToken})">
+            <summary>
+            Add a task.
+            </summary>
+            <param name="guid">Guid.</param>
+            <param name="name">Name of the task.</param>
+            <param name="metadata">Dictionary containing metadata.</param>
+            <param name="action">Action.</param>
+            <returns>TaskDetails.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.Start">
+            <summary>
+            Start running tasks.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.Stop">
+            <summary>
+            Stop running tasks.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.Stop(System.Guid)">
+            <summary>
+            Stop a running task by GUID.
+            </summary>
+            <param name="guid">GUID.</param>
+        </member>
+    </members>
+</doc>
