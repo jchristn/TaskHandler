@@ -1,4 +1,4 @@
-![alt tag](https://raw.githubusercontent.com/jchristn/TaskHandler/main/Assets/logo.png)
+![alt tag](https://raw.githubusercontent.com/jchristn/TaskHandler/main/Assets/logo.png =250x250)
 
 # TaskHandler
 
