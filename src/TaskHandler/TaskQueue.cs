@@ -140,7 +140,8 @@ namespace TaskHandler
         private CancellationTokenSource _TaskRunnerTokenSource = new CancellationTokenSource();
         private CancellationToken _TaskRunnerToken;
         private Task _TaskRunner = null;
-        private int _IterationDelayMs = 50;
+
+        private int _IterationDelayMs = 100;
 
         #endregion
 
@@ -310,41 +311,45 @@ namespace TaskHandler
 
                     #region Check-for-Completed-Tasks
 
-                    ConcurrentDictionary<Guid, TaskDetails> updatedRunningTasks = new ConcurrentDictionary<Guid, TaskDetails>();
-                    foreach (KeyValuePair<Guid, TaskDetails> task in _RunningTasks)
+                    if (_RunningTasks.Count > 0)
                     {
-                        // Logger?.Invoke(_Header + "task " + task.Key.ToString() + " status: " + task.Value.Task.Status.ToString());
+                        ConcurrentDictionary<Guid, TaskDetails> updatedRunningTasks = new ConcurrentDictionary<Guid, TaskDetails>();
+                        
+                        foreach (KeyValuePair<Guid, TaskDetails> task in _RunningTasks)
+                        {
+                            // Logger?.Invoke(_Header + "task " + task.Key.ToString() + " status: " + task.Value.Task.Status.ToString());
 
-                        if (task.Value.Task.Status == TaskStatus.Created
-                            || task.Value.Task.Status == TaskStatus.Running
-                            || task.Value.Task.Status == TaskStatus.WaitingForActivation
-                            || task.Value.Task.Status == TaskStatus.WaitingForChildrenToComplete
-                            || task.Value.Task.Status == TaskStatus.WaitingToRun)
-                        {
-                            // Logger?.Invoke(_Header + "task " + task.Key.ToString() + " still running");
-                            updatedRunningTasks.TryAdd(task.Key, task.Value);
+                            if (task.Value.Task.Status == TaskStatus.Created
+                                || task.Value.Task.Status == TaskStatus.Running
+                                || task.Value.Task.Status == TaskStatus.WaitingForActivation
+                                || task.Value.Task.Status == TaskStatus.WaitingForChildrenToComplete
+                                || task.Value.Task.Status == TaskStatus.WaitingToRun)
+                            {
+                                // Logger?.Invoke(_Header + "task " + task.Key.ToString() + " still running");
+                                updatedRunningTasks.TryAdd(task.Key, task.Value);
+                            }
+                            else if (task.Value.Task.Status == TaskStatus.RanToCompletion)
+                            {
+                                // do not add it to the updated list
+                                Logger?.Invoke(_Header + "task " + task.Key.ToString() + " completed");
+                                OnTaskFinished?.Invoke(this, task.Value);
+                            }
+                            else if (task.Value.Task.Status == TaskStatus.Faulted)
+                            {
+                                // do not add it to the updated list
+                                Logger?.Invoke(_Header + "task " + task.Key.ToString() + " faulted");
+                                OnTaskFaulted?.Invoke(this, task.Value);
+                            }
+                            else if (task.Value.Task.Status == TaskStatus.Canceled)
+                            {
+                                // do not add it to the updated list
+                                Logger?.Invoke(_Header + "task " + task.Key.ToString() + " canceled");
+                                OnTaskCanceled?.Invoke(this, task.Value);
+                            }
                         }
-                        else if (task.Value.Task.Status == TaskStatus.RanToCompletion)
-                        {
-                            // do not add it to the updated list
-                            Logger?.Invoke(_Header + "task " + task.Key.ToString() + " completed");
-                            OnTaskFinished?.Invoke(this, task.Value);
-                        }
-                        else if (task.Value.Task.Status == TaskStatus.Faulted)
-                        {
-                            // do not add it to the updated list
-                            Logger?.Invoke(_Header + "task " + task.Key.ToString() + " faulted");
-                            OnTaskFaulted?.Invoke(this, task.Value);
-                        }
-                        else if (task.Value.Task.Status == TaskStatus.Canceled)
-                        {
-                            // do not add it to the updated list
-                            Logger?.Invoke(_Header + "task " + task.Key.ToString() + " canceled");
-                            OnTaskCanceled?.Invoke(this, task.Value);
-                        }
+                        
+                        _RunningTasks = updatedRunningTasks;
                     }
-
-                    _RunningTasks = updatedRunningTasks;
 
                     #endregion
                 }
