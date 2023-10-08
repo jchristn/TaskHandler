@@ -161,5 +161,19 @@
             </summary>
             <param name="guid">GUID.</param>
         </member>
+        <member name="T:TaskHandler.TaskRunWithTimeout">
+            <summary>
+            Task runner with timeout.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskRunWithTimeout.Go``1(System.Threading.Tasks.Task{``0},System.Int32)">
+            <summary>
+            Run a task with a given timeout.
+            </summary>
+            <typeparam name="T">Result type.</typeparam>
+            <param name="task">Task.</param>
+            <param name="timeoutMs">Timeout in milliseconds.</param>
+            <returns>Task.</returns>
+        </member>
     </members>
 </doc>

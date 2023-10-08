@@ -64,6 +64,29 @@ queue.OnProcessingStarted += ...        // When the task queue is started
 queue.OnProcessingStopped += ...        // When the task queue is stopped
 ```
 
+## Run a Task with a Timeout
+```csharp
+string result;
+
+result = await TaskRunWithTimeout.Go(
+    Task.Run(async () =>
+    { 
+        await Task.Delay(1000); 
+        return "hello!";
+    }), 
+    2500); 
+// hello!
+
+result = await TaskRunWithTimeout.Go(
+    Task.Run(async () =>
+    { 
+        await Task.Delay(5000); 
+        return "hello!"; 
+    }), 
+    2500);
+// TimeoutException thrown
+```
+
 ## Version History
 
 Please refer to CHANGELOG.md for version history.
