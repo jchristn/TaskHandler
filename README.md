@@ -68,23 +68,34 @@ queue.OnProcessingStopped += ...        // When the task queue is stopped
 ```csharp
 string result;
 
-result = await TaskRunWithTimeout.Go(
-    Task.Run(async () =>
-    { 
-        await Task.Delay(1000); 
-        return "hello!";
-    }), 
-    2500); 
-// hello!
+CancellationTokenSource tokenSource = new CancellationTokenSource();
+CancellationToken token = tokenSource.Token;
 
-result = await TaskRunWithTimeout.Go(
-    Task.Run(async () =>
-    { 
-        await Task.Delay(5000); 
-        return "hello!"; 
-    }), 
-    2500);
-// TimeoutException thrown
+//
+// task without cancellation token and no return value 
+//
+Func<Task<string>> task = async () =>
+{
+  return "Hello, world!";
+};
+
+result = await TaskRunWithTimeout.Go(task, 2500, tokenSource); // "Hello, world!"
+
+//
+// task with cancellation token and return value
+//
+Func<CancellationToken, Task<string>> task = async (CancellationToken token) =>
+{
+  for (int i = 0; i < 25; i++) // wait 2.5 seconds in total
+  {
+    await Task.Delay(100);
+    token.ThrowIfCancellationRequested(); // check for cancellation
+  }
+  return "Hello, world!";
+};
+
+result = await TaskRunWithTimeout.Go(task(token), 500, tokenSource); // throws TimeoutException
+result = await TaskRunWithTimeout.Go(task(token), 5000, tokenSource); // "Hello, world!"
 ```
 
 ## Version History

@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<Version>1.0.3</Version>
+		<Version>1.0.5</Version>
 		<TargetFrameworks>net6.0;net7.0</TargetFrameworks>
 		<ApplicationIcon>logo.ico</ApplicationIcon>
 		<GenerateDocumentationFile>True</GenerateDocumentationFile>

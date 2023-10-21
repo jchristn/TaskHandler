@@ -166,14 +166,24 @@
             Task runner with timeout.
             </summary>
         </member>
-        <member name="M:TaskHandler.TaskRunWithTimeout.Go``1(System.Threading.Tasks.Task{``0},System.Int32,System.Threading.CancellationToken)">
+        <member name="P:TaskHandler.TaskRunWithTimeout.Logger">
+            <summary>
+            Method to invoke to send log messages.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskRunWithTimeout.LogHeader">
+            <summary>
+            Message header to prepend to each emitted log message.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskRunWithTimeout.Go``1(System.Threading.Tasks.Task{``0},System.Int32,System.Threading.CancellationTokenSource)">
             <summary>
             Run a task with a given timeout.
             </summary>
             <typeparam name="T">Result type.</typeparam>
             <param name="task">Task.</param>
             <param name="timeoutMs">Timeout in milliseconds.</param>
-            <param name="token">Cancellation token.</param>
+            <param name="tokenSource">Cancellation token source.</param>
             <returns>Task.</returns>
         </member>
     </members>
