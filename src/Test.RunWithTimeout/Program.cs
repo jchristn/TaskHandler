@@ -3,6 +3,7 @@
     using System;
     using System.Threading;
     using System.Threading.Tasks;
+    using GetSomeInput;
     using TaskHandler;
 
     public static class Program
@@ -10,20 +11,20 @@
         public static async Task Main(string[] args)
         {
             // string result = null;
-            Person result = null;
+            Person result1 = null;
             int delay;
 
             CancellationTokenSource tokenSource = new CancellationTokenSource();
             CancellationToken token = tokenSource.Token;
 
-            for (int i = 0; i < 100; i++)
+            for (int i = 0; i < 5; i++)
             {
                 try
                 {
                     if (i % 2 == 0) delay = 3000;
                     else delay = 500;
 
-                    Func<CancellationToken, Task<Person>> task = async (CancellationToken token) =>
+                    Func<CancellationToken, Task<Person>> task1 = async (CancellationToken token) =>
                     {
                         try
                         {
@@ -38,10 +39,10 @@
                         }
                     };
 
-                    result = await TaskRunWithTimeout.Go(task(token), 2500, tokenSource);
+                    result1 = await TaskRunWithTimeout.Go(task1(token), 2500, tokenSource);
 
-                    if (result != null)
-                        Console.WriteLine(i + ": " + result.FirstName + " " + result.LastName);
+                    if (result1 != null)
+                        Console.WriteLine(i + ": " + result1.FirstName + " " + result1.LastName);
                     else
                         Console.WriteLine(i + ": null");
                 }
@@ -50,6 +51,19 @@
                     Console.WriteLine(i + ": timeout");
                 }
             }
+
+            Console.WriteLine("");
+            string input = Inputty.GetString("Text to echo:", null, false);
+
+            Func<string, CancellationToken, Task<string>> task2 = async (string text, CancellationToken token) =>
+            {
+                return text;
+            };
+
+            string result2 = await TaskRunWithTimeout.Go(task2("hello world", token), 2500, tokenSource);
+            Console.WriteLine("Returned: " + result2);
+
+            Console.WriteLine("");
         }
 
         public class Person

@@ -96,6 +96,14 @@ Func<CancellationToken, Task<string>> task = async (CancellationToken token) =>
 
 result = await TaskRunWithTimeout.Go(task(token), 500, tokenSource); // throws TimeoutException
 result = await TaskRunWithTimeout.Go(task(token), 5000, tokenSource); // "Hello, world!"
+
+// task with cancellation token, input parameter, and return value
+Func<string, CancellationToken, Task<string>> task2 = async (string text, CancellationToken token) =>
+{
+    return text;
+};
+
+result = await TaskRunWithTimeout.Go(task2("hello world", token), 2500, tokenSource);
 ```
 
 ## Version History
