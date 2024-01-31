@@ -1,12 +1,10 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace TaskHandler
+﻿namespace TaskHandler
 {
+    using System;
+    using System.Collections.Generic;
+    using System.Threading;
+    using System.Threading.Tasks;
+
     /// <summary>
     /// Task details.
     /// </summary>

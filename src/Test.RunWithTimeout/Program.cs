@@ -1,11 +1,10 @@
-﻿using System;
-using System.Diagnostics.Metrics;
-using System.Threading;
-using System.Threading.Tasks;
-using TaskHandler;
-
-namespace Test.RunWithTimeout
+﻿namespace Test.RunWithTimeout
 {
+    using System;
+    using System.Threading;
+    using System.Threading.Tasks;
+    using TaskHandler;
+
     public static class Program
     {
         public static async Task Main(string[] args)

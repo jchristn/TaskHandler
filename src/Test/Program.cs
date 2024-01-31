@@ -1,14 +1,12 @@
-﻿using System;
-using System.Collections;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Xml.Linq;
-using GetSomeInput;
-using TaskHandler;
-
-namespace Test
+﻿namespace Test
 {
+    using System;
+    using System.Collections.Generic;
+    using System.Threading;
+    using System.Threading.Tasks;
+    using GetSomeInput;
+    using TaskHandler;
+
     public static class Program
     {
         private static bool _RunForever = true;

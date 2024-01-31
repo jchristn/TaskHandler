@@ -1,13 +1,13 @@
-﻿using System;
-using System.Threading;
-using System.Threading.Tasks;
-using TaskHandler;
-using Timestamps;
-using GetSomeInput;
-using RestWrapper;
-
-namespace Test.RunWithTimeoutHttp
+﻿namespace Test.RunWithTimeoutHttp
 {
+    using System;
+    using System.Threading;
+    using System.Threading.Tasks;
+    using TaskHandler;
+    using Timestamps;
+    using GetSomeInput;
+    using RestWrapper;
+
     public static class Program
     {
         public static async Task Main(string[] args)
