@@ -127,7 +127,7 @@
 
                 string name = "Task." + guid.ToString() + "." + wait.ToString();
 
-                Action<CancellationToken> action = delegate(CancellationToken token)
+                Action<CancellationToken> action1 = delegate(CancellationToken token)
                 { 
                     Console.WriteLine(name + " running");
 
@@ -164,7 +164,7 @@
                     }
                 };
 
-                _TaskQueue.AddTask(guid, name, new Dictionary<string, object>(), action);
+                _TaskQueue.AddTask(guid, name, new Dictionary<string, object>(), action1);
             }
         }
 

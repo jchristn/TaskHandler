@@ -3,6 +3,7 @@
     using System;
     using System.Collections.Concurrent;
     using System.Collections.Generic;
+    using System.ComponentModel.Design;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -203,6 +204,7 @@
                 Metadata = metadata,
                 Action = action
             };
+
             _QueuedTasks.Enqueue(details);
             OnTaskAdded?.Invoke(this, details);
             return details;
@@ -300,9 +302,9 @@
                             Logger?.Invoke(_Header + "dequeued task " + task.Guid.ToString());
                         }
 
-                        task.Task = Task.Run(() => task.Action(task.Token), task.Token);
-
                         _RunningTasks.TryAdd(task.Guid, task);
+
+                        task.Task = Task.Run(() => task.Action(task.Token), task.Token);
                         Logger?.Invoke(_Header + "started task " + task.Guid.ToString() + " (" + _RunningTasks.Count + " running tasks)");
                         OnTaskStarted?.Invoke(this, task);
                     }

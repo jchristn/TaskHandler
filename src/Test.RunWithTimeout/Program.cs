@@ -8,6 +8,8 @@
 
     public static class Program
     {
+#pragma warning disable CS1998 // Async method lacks 'await' operators and will run synchronously
+
         public static async Task Main(string[] args)
         {
             // string result = null;
@@ -60,7 +62,7 @@
                 return text;
             };
 
-            string result2 = await TaskRunWithTimeout.Go(task2("hello world", token), 2500, tokenSource);
+            string result2 = await TaskRunWithTimeout.Go(task2(input, token), 2500, tokenSource);
             Console.WriteLine("Returned: " + result2);
 
             Console.WriteLine("");
@@ -71,5 +73,7 @@
             public string FirstName { get; set; }
             public string LastName { get; set; }
         }
+
+#pragma warning restore CS1998 // Async method lacks 'await' operators and will run synchronously
     }
 }
