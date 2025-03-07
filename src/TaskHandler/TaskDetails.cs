@@ -41,7 +41,7 @@
         /// <summary>
         /// Action.
         /// </summary>
-        public Action<CancellationToken> Action { get; set; }
+        public Func<CancellationToken, Task> Function { get; set; }
 
         /// <summary>
         /// Task.

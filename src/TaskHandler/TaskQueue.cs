@@ -191,18 +191,18 @@
         /// <param name="guid">Guid.</param>
         /// <param name="name">Name of the task.</param>
         /// <param name="metadata">Dictionary containing metadata.</param>
-        /// <param name="action">Action.</param>
+        /// <param name="func">Action.</param>
         /// <returns>TaskDetails.</returns>
-        public TaskDetails AddTask(Guid guid, string name, Dictionary<string, object> metadata, Action<CancellationToken> action)
+        public TaskDetails AddTask(Guid guid, string name, Dictionary<string, object> metadata, Func<CancellationToken, Task> func)
         {
             if (String.IsNullOrEmpty(name)) throw new ArgumentNullException(nameof(name));
-            if (action == null) throw new ArgumentNullException(nameof(action));
+            if (func == null) throw new ArgumentNullException(nameof(func));
             TaskDetails details = new TaskDetails
             {
                 Guid = guid,
                 Name = name,
                 Metadata = metadata,
-                Action = action
+                Function = func
             };
 
             _QueuedTasks.Enqueue(details);
@@ -304,13 +304,13 @@
 
                         _RunningTasks.TryAdd(task.Guid, task);
 
-                        task.Task = Task.Run(() => task.Action(task.Token), task.Token);
+                        task.Task = Task.Run(() => task.Function(task.Token), task.Token);
                         Logger?.Invoke(_Header + "started task " + task.Guid.ToString() + " (" + _RunningTasks.Count + " running tasks)");
                         OnTaskStarted?.Invoke(this, task);
                     }
 
                     #endregion
-
+                    
                     #region Check-for-Completed-Tasks
 
                     if (_RunningTasks.Count > 0)

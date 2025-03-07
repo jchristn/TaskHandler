@@ -24,7 +24,7 @@
             User-supplied metadata.
             </summary>
         </member>
-        <member name="P:TaskHandler.TaskDetails.Action">
+        <member name="P:TaskHandler.TaskDetails.Function">
             <summary>
             Action.
             </summary>
@@ -135,14 +135,14 @@
             Dispose.
             </summary>
         </member>
-        <member name="M:TaskHandler.TaskQueue.AddTask(System.Guid,System.String,System.Collections.Generic.Dictionary{System.String,System.Object},System.Action{System.Threading.CancellationToken})">
+        <member name="M:TaskHandler.TaskQueue.AddTask(System.Guid,System.String,System.Collections.Generic.Dictionary{System.String,System.Object},System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task})">
             <summary>
             Add a task.
             </summary>
             <param name="guid">Guid.</param>
             <param name="name">Name of the task.</param>
             <param name="metadata">Dictionary containing metadata.</param>
-            <param name="action">Action.</param>
+            <param name="func">Action.</param>
             <returns>TaskDetails.</returns>
         </member>
         <member name="M:TaskHandler.TaskQueue.Start">

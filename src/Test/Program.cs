@@ -127,27 +127,23 @@
 
                 string name = "Task." + guid.ToString() + "." + wait.ToString();
 
-                Action<CancellationToken> action1 = delegate(CancellationToken token)
-                { 
+                Func<CancellationToken, Task> action1 = async (CancellationToken token) =>
+                {
                     Console.WriteLine(name + " running");
-
                     try
                     {
                         int waited = 0;
-
                         while (true)
-                        { 
+                        {
                             if (token.IsCancellationRequested)
                             {
                                 Console.WriteLine("!!! " + name + " cancellation requested");
                                 break;
                             }
-                            Thread.Sleep(100);
+                            await Task.Delay(100, token);
                             waited += 100;
-
                             if (waited >= wait) break;
                         }
-
                         Console.WriteLine(name + " finished");
                     }
                     catch (TaskCanceledException)

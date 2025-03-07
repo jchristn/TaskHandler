@@ -30,9 +30,9 @@ queue.AddTask(
   Guid.NewGuid(),                       // unique identifier
   "Task 1",                             // name for the task
   new Dictionary<string, object>(),     // any metadata you like!
-  delegate(CancellationToken token) {   // your task in form of Action<CancellationToken>
+  async (CancellationToken token) => {  // your task in form of Func<CancellationToken, Task>
   	Console.WriteLine("Task 1 starting!");
-  	Task.Delay(10000).Wait();
+  	await Task.Delay(10000, token);
   	Console.WriteLine("Task 1 ending!");
   });
 
@@ -40,9 +40,9 @@ queue.AddTask(
   Guid.NewGuid(),                       // unique identifier
   "Task 2",                             // name for the task
   new Dictionary<string, object>(),     // any metadata you like!
-  delegate(CancellationToken token) {   // your task in form of Action<CancellationToken>
+  async (CancellationToken token) => {  // your task in form of Func<CancellationToken, Task>
   	Console.WriteLine("Task 2 starting!");
-  	Task.Delay(5000).Wait();
+  	await Task.Delay(5000, token);
   	Console.WriteLine("Task 2 ending!");
   });
 
