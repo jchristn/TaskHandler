@@ -12,42 +12,196 @@
         <member name="P:TaskHandler.TaskDetails.Guid">
             <summary>
             GUID.
+            Default: Guid.NewGuid().
             </summary>
         </member>
         <member name="P:TaskHandler.TaskDetails.Name">
             <summary>
             User-supplied name.
+            Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskDetails.Metadata">
             <summary>
             User-supplied metadata.
+            Default: Empty dictionary.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskDetails.Function">
             <summary>
             Action.
+            Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskDetails.Task">
             <summary>
             Task.
+            Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskDetails.TokenSource">
             <summary>
             Token source.
+            Default: new CancellationTokenSource().
             </summary>
         </member>
         <member name="P:TaskHandler.TaskDetails.Token">
             <summary>
             Token.
+            Initialized from TokenSource.Token in constructor.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.Priority">
+            <summary>
+            Task priority. Lower number = higher priority.
+            Default: 0 (Normal priority).
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.EnqueuedAt">
+            <summary>
+            Timestamp when task was enqueued.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.StartedAt">
+            <summary>
+            Timestamp when task started execution.
+            Null if task has not started yet.
             </summary>
         </member>
         <member name="M:TaskHandler.TaskDetails.#ctor">
             <summary>
             Instantiate.
             </summary>
+        </member>
+        <member name="T:TaskHandler.TaskHandle`1">
+            <summary>
+            Handle to an enqueued task with result.
+            </summary>
+            <typeparam name="T">Result type.</typeparam>
+        </member>
+        <member name="P:TaskHandler.TaskHandle`1.Id">
+            <summary>
+            Task identifier.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskHandle`1.Name">
+            <summary>
+            Task name.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskHandle`1.Task">
+            <summary>
+            Task that will complete with the result.
+            </summary>
+        </member>
+        <member name="T:TaskHandler.TaskInfo">
+            <summary>
+            Read-only snapshot of task information.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskInfo.Id">
+            <summary>
+            Task identifier.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskInfo.Name">
+            <summary>
+            Task name.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskInfo.Status">
+            <summary>
+            Task status.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskInfo.Priority">
+            <summary>
+            Task priority. Lower number = higher priority.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskInfo.Metadata">
+            <summary>
+            Read-only copy of task metadata.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskInfo.#ctor(System.Guid,System.String,System.Threading.Tasks.TaskStatus,System.Int32,System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object})">
+            <summary>
+            Instantiate.
+            </summary>
+            <param name="id">Task identifier.</param>
+            <param name="name">Task name.</param>
+            <param name="status">Task status.</param>
+            <param name="priority">Task priority.</param>
+            <param name="metadata">Task metadata.</param>
+        </member>
+        <member name="T:TaskHandler.TaskPriority">
+            <summary>
+            Standard task priorities. Lower number = higher priority.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskPriority.Urgent">
+            <summary>
+            Urgent priority (0).
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskPriority.High">
+            <summary>
+            High priority (1).
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskPriority.Normal">
+            <summary>
+            Normal priority (2).
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskPriority.Low">
+            <summary>
+            Low priority (3).
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskPriority.Background">
+            <summary>
+            Background priority (4).
+            </summary>
+        </member>
+        <member name="T:TaskHandler.TaskProgress">
+            <summary>
+            Represents progress information for a task.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskProgress.Current">
+            <summary>
+            Current progress value.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskProgress.Total">
+            <summary>
+            Total expected value for completion.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskProgress.PercentComplete">
+            <summary>
+            Percentage of completion (0-100).
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskProgress.Message">
+            <summary>
+            Optional message describing current progress state.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskProgress.#ctor(System.Int32,System.Int32,System.String)">
+            <summary>
+            Create a new TaskProgress instance.
+            </summary>
+            <param name="current">Current progress value.</param>
+            <param name="total">Total expected value.</param>
+            <param name="message">Optional progress message.</param>
+        </member>
+        <member name="M:TaskHandler.TaskProgress.ToString">
+            <summary>
+            Get a human-readable representation of the progress.
+            </summary>
+            <returns>Formatted progress string.</returns>
         </member>
         <member name="T:TaskHandler.TaskQueue">
             <summary>
@@ -57,11 +211,19 @@
         <member name="P:TaskHandler.TaskQueue.Logger">
             <summary>
             Method to invoke to send log messages.
+            Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.MaxConcurrentTasks">
             <summary>
             Maximum number of concurrent tasks.
+            Default: 32. Minimum: 1.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.MaxQueueSize">
+            <summary>
+            Maximum queue size. -1 for unbounded.
+            Default: -1 (unbounded)
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.RunningCount">
@@ -74,44 +236,51 @@
             Running tasks dictionary.
             </summary>
         </member>
-        <member name="P:TaskHandler.TaskQueue.QueuedTasks">
+        <member name="P:TaskHandler.TaskQueue.QueuedCount">
             <summary>
-            Queue containing tasks waiting to be started.
+            Number of tasks waiting in the queue.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.OnTaskAdded">
             <summary>
             Event to fire when a task is added.
+            Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.OnTaskStarted">
             <summary>
             Event to fire when a task is started.
+            Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.OnTaskCanceled">
             <summary>
             Event to fire when a task is canceled.
+            Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.OnTaskFaulted">
             <summary>
             Event to fire when a task is faulted.
+            Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.OnTaskFinished">
             <summary>
             Event to fire when a task is finished.
+            Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.OnProcessingStarted">
             <summary>
             Event to fire when processing starts.
+            Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.OnProcessingStopped">
             <summary>
             Event to fire when processing stops.
+            Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.IsRunning">
@@ -119,21 +288,36 @@
             Boolean to indicate whether or not the task runner is running.
             </summary>
         </member>
-        <member name="P:TaskHandler.TaskQueue.IterationDelayMs">
-            <summary>
-            Iteration delay when checking for additional tasks to run.
-            </summary>
-        </member>
-        <member name="M:TaskHandler.TaskQueue.#ctor(System.Int32)">
+        <member name="M:TaskHandler.TaskQueue.#ctor(System.Int32,System.Int32)">
             <summary>
             Instantiate.
             </summary>
-            <param name="maxConcurrentTasks">Maximum concurrent tasks.</param>
+            <param name="maxConcurrentTasks">Maximum concurrent tasks. Default: 32. Minimum: 1.</param>
+            <param name="maxQueueSize">Maximum queue size. -1 for unbounded. Default: -1.</param>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.#ctor(TaskHandler.TaskQueueOptions)">
+            <summary>
+            Instantiate with options.
+            </summary>
+            <param name="options">TaskQueue options.</param>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.Create(System.Action{TaskHandler.TaskQueueOptions})">
+            <summary>
+            Create a TaskQueue with configuration via options pattern.
+            </summary>
+            <param name="configure">Configuration action.</param>
+            <returns>Configured TaskQueue instance.</returns>
         </member>
         <member name="M:TaskHandler.TaskQueue.Dispose">
             <summary>
             Dispose.
             </summary>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.DisposeAsync">
+            <summary>
+            Dispose asynchronously.
+            </summary>
+            <returns>ValueTask.</returns>
         </member>
         <member name="M:TaskHandler.TaskQueue.AddTask(System.Guid,System.String,System.Collections.Generic.Dictionary{System.String,System.Object},System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task})">
             <summary>
@@ -145,21 +329,260 @@
             <param name="func">Action.</param>
             <returns>TaskDetails.</returns>
         </member>
+        <member name="M:TaskHandler.TaskQueue.AddTaskAsync(System.Guid,System.String,System.Collections.Generic.Dictionary{System.String,System.Object},System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task},System.Threading.CancellationToken)">
+            <summary>
+            Add a task asynchronously.
+            </summary>
+            <param name="guid">Guid.</param>
+            <param name="name">Name of the task.</param>
+            <param name="metadata">Dictionary containing metadata.</param>
+            <param name="func">Action.</param>
+            <param name="cancellationToken">Cancellation token.</param>
+            <returns>TaskDetails.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.EnqueueAsync(System.String,System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task},System.Int32,System.Nullable{System.TimeSpan},System.Threading.CancellationToken)">
+            <summary>
+            Enqueue a task with priority and timeout support.
+            </summary>
+            <param name="name">Name of the task.</param>
+            <param name="func">Task function.</param>
+            <param name="priority">Task priority (lower number = higher priority). Default: 0.</param>
+            <param name="timeout">Optional timeout for task execution.</param>
+            <param name="cancellationToken">Cancellation token.</param>
+            <returns>Task GUID.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.EnqueueAsync``1(System.String,System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task{``0}},System.Int32,System.Nullable{System.TimeSpan},System.Threading.CancellationToken)">
+            <summary>
+            Enqueue a task with a result.
+            </summary>
+            <typeparam name="T">Result type.</typeparam>
+            <param name="name">Name of the task.</param>
+            <param name="func">Task function that returns a result.</param>
+            <param name="priority">Task priority (lower number = higher priority). Default: 0.</param>
+            <param name="timeout">Optional timeout for task execution.</param>
+            <param name="cancellationToken">Cancellation token.</param>
+            <returns>TaskHandle that can be awaited for the result.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.EnqueueAsync``1(System.String,System.Func{System.Threading.CancellationToken,System.IProgress{TaskHandler.TaskProgress},System.Threading.Tasks.Task{``0}},System.IProgress{TaskHandler.TaskProgress},System.Int32,System.Nullable{System.TimeSpan},System.Threading.CancellationToken)">
+            <summary>
+            Enqueue a task with progress reporting support.
+            </summary>
+            <typeparam name="T">Result type.</typeparam>
+            <param name="name">Name of the task.</param>
+            <param name="func">Task function that accepts IProgress and returns a result.</param>
+            <param name="progress">Progress reporter.</param>
+            <param name="priority">Task priority (lower number = higher priority). Default: 0.</param>
+            <param name="timeout">Optional timeout for task execution.</param>
+            <param name="cancellationToken">Cancellation token.</param>
+            <returns>TaskHandle that can be awaited for the result.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.EnqueueAsync(System.String,System.Func{System.Threading.CancellationToken,System.IProgress{TaskHandler.TaskProgress},System.Threading.Tasks.Task},System.IProgress{TaskHandler.TaskProgress},System.Int32,System.Nullable{System.TimeSpan},System.Threading.CancellationToken)">
+            <summary>
+            Enqueue a task with progress reporting support (no result).
+            </summary>
+            <param name="name">Name of the task.</param>
+            <param name="func">Task function that accepts IProgress.</param>
+            <param name="progress">Progress reporter.</param>
+            <param name="priority">Task priority (lower number = higher priority). Default: 0.</param>
+            <param name="timeout">Optional timeout for task execution.</param>
+            <param name="cancellationToken">Cancellation token.</param>
+            <returns>Task GUID.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.GetRunningTasksInfo">
+            <summary>
+            Get read-only information about all currently running tasks.
+            </summary>
+            <returns>Collection of TaskInfo objects.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.GetStatistics">
+            <summary>
+            Get current queue statistics and metrics.
+            </summary>
+            <returns>TaskQueueStatistics instance.</returns>
+        </member>
         <member name="M:TaskHandler.TaskQueue.Start">
             <summary>
             Start running tasks.
             </summary>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.StartAsync(System.Threading.CancellationToken)">
+            <summary>
+            Start running tasks asynchronously.
+            </summary>
+            <param name="cancellationToken">Cancellation token.</param>
+            <returns>Task.</returns>
         </member>
         <member name="M:TaskHandler.TaskQueue.Stop">
             <summary>
             Stop running tasks.
             </summary>
         </member>
+        <member name="M:TaskHandler.TaskQueue.StopAsync(System.Boolean,System.Threading.CancellationToken)">
+            <summary>
+            Stop running tasks asynchronously.
+            </summary>
+            <param name="waitForCompletion">Whether to wait for running tasks to complete.</param>
+            <param name="cancellationToken">Cancellation token.</param>
+            <returns>Task.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.WaitForCompletionAsync(System.Threading.CancellationToken)">
+            <summary>
+            Wait for all tasks to complete.
+            </summary>
+            <param name="cancellationToken">Cancellation token.</param>
+            <returns>Task.</returns>
+        </member>
         <member name="M:TaskHandler.TaskQueue.Stop(System.Guid)">
             <summary>
             Stop a running task by GUID.
             </summary>
             <param name="guid">GUID.</param>
+        </member>
+        <member name="T:TaskHandler.TaskQueueOptions">
+            <summary>
+            Configuration options for TaskQueue.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueOptions.MaxConcurrentTasks">
+            <summary>
+            Maximum number of tasks that can run concurrently.
+            Default: 32. Minimum: 1.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueOptions.MaxQueueSize">
+            <summary>
+            Maximum queue size. -1 for unbounded.
+            Default: -1 (unbounded). Minimum: -1 or greater than 0.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueOptions.Logger">
+            <summary>
+            Logger callback.
+            Default: null.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueOptions.OnTaskAdded">
+            <summary>
+            Event fired when a task is added.
+            Default: null.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueOptions.OnTaskStarted">
+            <summary>
+            Event fired when a task starts.
+            Default: null.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueOptions.OnTaskFinished">
+            <summary>
+            Event fired when a task completes successfully.
+            Default: null.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueOptions.OnTaskFaulted">
+            <summary>
+            Event fired when a task faults.
+            Default: null.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueOptions.OnTaskCanceled">
+            <summary>
+            Event fired when a task is canceled.
+            Default: null.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueOptions.OnProcessingStarted">
+            <summary>
+            Event fired when queue starts processing.
+            Default: null.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueOptions.OnProcessingStopped">
+            <summary>
+            Event fired when queue stops processing.
+            Default: null.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskQueueOptions.#ctor">
+            <summary>
+            Configuration options for TaskQueue.
+            </summary>
+        </member>
+        <member name="T:TaskHandler.TaskQueueStatistics">
+            <summary>
+            Statistics and metrics for TaskQueue operations.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueStatistics.TotalEnqueued">
+            <summary>
+            Total number of tasks enqueued since queue creation.
+            Default: 0.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueStatistics.TotalCompleted">
+            <summary>
+            Total number of tasks completed successfully.
+            Default: 0.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueStatistics.TotalFailed">
+            <summary>
+            Total number of tasks that failed (faulted).
+            Default: 0.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueStatistics.TotalCanceled">
+            <summary>
+            Total number of tasks that were canceled.
+            Default: 0.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueStatistics.CurrentQueueDepth">
+            <summary>
+            Current number of tasks waiting in the queue.
+            Default: 0.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueStatistics.CurrentRunningCount">
+            <summary>
+            Current number of tasks actively running.
+            Default: 0.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueStatistics.AverageExecutionTime">
+            <summary>
+            Average execution time across completed tasks.
+            Default: TimeSpan.Zero.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueStatistics.AverageWaitTime">
+            <summary>
+            Average time tasks spent waiting in queue before execution.
+            Default: TimeSpan.Zero.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueStatistics.LastTaskStarted">
+            <summary>
+            Timestamp when the most recent task started execution.
+            Default: null.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueStatistics.LastTaskCompleted">
+            <summary>
+            Timestamp when the most recent task completed.
+            Default: null.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskQueueStatistics.#ctor">
+            <summary>
+            Create a new TaskQueueStatistics instance.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskQueueStatistics.ToString">
+            <summary>
+            Get a human-readable summary of the statistics.
+            </summary>
+            <returns>Formatted summary string.</returns>
         </member>
         <member name="T:TaskHandler.TaskRunWithTimeout">
             <summary>
@@ -169,11 +592,13 @@
         <member name="P:TaskHandler.TaskRunWithTimeout.Logger">
             <summary>
             Method to invoke to send log messages.
+            Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskRunWithTimeout.LogHeader">
             <summary>
             Message header to prepend to each emitted log message.
+            Default: "[TaskRunWithTimeout] ".
             </summary>
         </member>
         <member name="M:TaskHandler.TaskRunWithTimeout.Go``1(System.Threading.Tasks.Task{``0},System.Int32,System.Threading.CancellationTokenSource)">
