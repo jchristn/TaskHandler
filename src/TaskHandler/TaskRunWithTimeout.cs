@@ -12,11 +12,13 @@
     {
         /// <summary>
         /// Method to invoke to send log messages.
+        /// Default: null.
         /// </summary>
         public static Action<string> Logger { get; set; } = null;
 
         /// <summary>
         /// Message header to prepend to each emitted log message.
+        /// Default: "[TaskRunWithTimeout] ".
         /// </summary>
         public static string LogHeader { get; set; } = "[TaskRunWithTimeout] ";
 
@@ -33,7 +35,7 @@
             if (timeoutMs < 1) throw new ArgumentOutOfRangeException(nameof(timeoutMs));
             if (tokenSource == null) throw new ArgumentNullException(nameof(tokenSource));
 
-            if (await Task.WhenAny(new Task[] { task, Task.Delay(timeoutMs) }) == task)
+            if (await Task.WhenAny(new Task[] { task, Task.Delay(timeoutMs) }).ConfigureAwait(false) == task)
             {
                 Log("user task completed within the timeout window");
                 return task.Result;

@@ -1,13 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<Version>1.0.9</Version>
+		<Version>2.0.0</Version>
 		<TargetFrameworks>netstandard2.0;netstandard2.1;net6.0;net8.0</TargetFrameworks>
+		<LangVersion>8.0</LangVersion>
 		<ApplicationIcon>logo.ico</ApplicationIcon>
 		<GenerateDocumentationFile>True</GenerateDocumentationFile>
 		<DocumentationFile>.\TaskHandler.xml</DocumentationFile>
 		<Title>TaskHandler</Title>
-		<Authors>Joel Christner</Authors>
+		<Authors>jchristn</Authors>
 		<Description>A simple C# class library to help manage running a queue of tasks without relinquishing control.</Description>
 		<Copyright>(c)2025 Joel Christner</Copyright>
 		<PackageProjectUrl>https://github.com/jchristn/TaskHandler</PackageProjectUrl>
@@ -16,14 +17,23 @@
 		<RepositoryUrl>https://github.com/jchristn/TaskHandler</RepositoryUrl>
 		<RepositoryType>github</RepositoryType>
 		<PackageTags>task queue work scheduler</PackageTags>
-		<PackageReleaseNotes>Retarget to include net8.0.</PackageReleaseNotes>
+		<PackageReleaseNotes>v2.0.0: Event-driven architecture (10-100x faster), async API (StartAsync, StopAsync, DisposeAsync), task results (TaskHandle&lt;T&gt;), priorities, timeouts, statistics, progress reporting. BREAKING: Removed IterationDelayMs and QueuedTasks properties.</PackageReleaseNotes>
 		<PackageLicenseFile>LICENSE.md</PackageLicenseFile>
-		<IncludeSymbols>False</IncludeSymbols>
+		<IncludeSymbols>True</IncludeSymbols>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+		<SymbolPackageFormat>snupkg</SymbolPackageFormat>
 	</PropertyGroup>
 
 	<ItemGroup>
 	  <Content Include="logo.ico" />
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0' OR '$(TargetFramework)' == 'netstandard2.1'">
+	  <PackageReference Include="System.Threading.Channels" Version="8.0.0" />
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+	  <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
 	</ItemGroup>
 
 	<ItemGroup>

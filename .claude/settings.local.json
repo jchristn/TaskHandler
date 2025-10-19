@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet build TaskHandler.sln)",
+      "Bash(dotnet sln TaskHandler.sln add Test.Automated/Test.Automated.csproj)",
+      "Bash(./Test.Automated.exe)",
+      "Bash(dotnet build Test.Automated/Test.Automated.csproj)",
+      "Bash(dotnet build TaskHandler.sln -c Release)",
+      "Bash(dotnet run)",
+      "Bash(dotnet run --framework net8.0)",
+      "Bash(dotnet sln \"src/TaskHandler.sln\" add \"src/Test.Automated/Test.Automated.csproj\")",
+      "Bash(dotnet build)",
+      "Bash(dotnet run --configuration Release --framework net8.0)",
+      "Bash(dotnet run --configuration Debug --framework net8.0)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
