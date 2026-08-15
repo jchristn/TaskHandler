@@ -65,6 +65,25 @@ namespace Test.Automated
             await RunTest("Test 37: Progress Reporting Without Result", Test_ProgressReportingWithoutResult);
             await RunTest("Test 38: Progress Reporting Percentage", Test_ProgressReportingPercentage);
 
+            // Negative tests: input validation and misuse
+            await RunTest("Test 39: AddTask Null Name Throws", Test_AddTaskNullNameThrows);
+            await RunTest("Test 40: AddTask Null Func Throws", Test_AddTaskNullFuncThrows);
+            await RunTest("Test 41: EnqueueAsync Null Func Throws", Test_EnqueueAsyncNullFuncThrows);
+            await RunTest("Test 42: Constructor Invalid MaxQueueSize Throws", Test_ConstructorInvalidMaxQueueSizeThrows);
+            await RunTest("Test 43: MaxConcurrentTasks Invalid Throws", Test_MaxConcurrentTasksInvalidThrows);
+            await RunTest("Test 44: MaxQueueSize Invalid Throws", Test_MaxQueueSizeInvalidThrows);
+            await RunTest("Test 45: Stop After Dispose Throws", Test_StopAfterDisposeThrows);
+            await RunTest("Test 46: Bounded Queue Overflow Throws", Test_BoundedQueueOverflowThrows);
+            await RunTest("Test 47: Stop Unknown Guid Is Graceful", Test_StopUnknownGuidGraceful);
+
+            // Positive tests: async lifecycle and bounded queue behavior
+            await RunTest("Test 48: EnqueueAsync Generic With Timeout Success", Test_EnqueueAsyncGenericTimeoutSuccess);
+            await RunTest("Test 49: StartAsync StopAsync Lifecycle", Test_StartAsyncStopAsyncLifecycle);
+            await RunTest("Test 50: DisposeAsync Cleanup", Test_DisposeAsyncCleanup);
+            await RunTest("Test 51: WaitForCompletionAsync", Test_WaitForCompletionAsync);
+            await RunTest("Test 52: Bounded Queue Processes All Tasks", Test_BoundedQueueProcessesAllTasks);
+            await RunTest("Test 53: TaskPriority Enum Ordering", Test_TaskPriorityEnumOrdering);
+
             // Print summary
             Console.WriteLine();
             Console.WriteLine("=======================================================================");
@@ -1537,6 +1556,380 @@ namespace Test.Automated
             else
             {
                 return TestResult.Fail($"Expected 100% progress, got has100%={has100Percent}, result={result}");
+            }
+        }
+
+        // =====================================================================
+        // Negative tests: input validation and misuse
+        // =====================================================================
+
+        private static async Task<TestResult> Test_AddTaskNullNameThrows()
+        {
+            TaskQueue queue = new TaskQueue();
+
+            try
+            {
+                queue.AddTask(
+                    Guid.NewGuid(),
+                    null!,
+                    new Dictionary<string, object>(),
+                    async (CancellationToken token) => await Task.Delay(10, token));
+                return TestResult.Fail("Should have thrown ArgumentNullException for null name");
+            }
+            catch (ArgumentNullException)
+            {
+                return TestResult.Pass();
+            }
+            finally
+            {
+                queue.Dispose();
+            }
+        }
+
+        private static async Task<TestResult> Test_AddTaskNullFuncThrows()
+        {
+            TaskQueue queue = new TaskQueue();
+
+            try
+            {
+                queue.AddTask(
+                    Guid.NewGuid(),
+                    "NullFuncTask",
+                    new Dictionary<string, object>(),
+                    null!);
+                return TestResult.Fail("Should have thrown ArgumentNullException for null func");
+            }
+            catch (ArgumentNullException)
+            {
+                return TestResult.Pass();
+            }
+            finally
+            {
+                queue.Dispose();
+            }
+        }
+
+        private static async Task<TestResult> Test_EnqueueAsyncNullFuncThrows()
+        {
+            TaskQueue queue = new TaskQueue();
+            queue.Start();
+
+            try
+            {
+                await queue.EnqueueAsync<int>("NullFuncTask", null!);
+                return TestResult.Fail("Should have thrown ArgumentNullException for null func");
+            }
+            catch (ArgumentNullException)
+            {
+                return TestResult.Pass();
+            }
+            finally
+            {
+                queue.Stop();
+                queue.Dispose();
+            }
+        }
+
+        private static async Task<TestResult> Test_ConstructorInvalidMaxQueueSizeThrows()
+        {
+            try
+            {
+                TaskQueue queue = new TaskQueue(32, 0);
+                queue.Dispose();
+                return TestResult.Fail("Should have thrown ArgumentOutOfRangeException for MaxQueueSize of 0");
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return TestResult.Pass();
+            }
+        }
+
+        private static async Task<TestResult> Test_MaxConcurrentTasksInvalidThrows()
+        {
+            TaskQueue queue = new TaskQueue();
+
+            try
+            {
+                queue.MaxConcurrentTasks = 0;
+                return TestResult.Fail("Should have thrown ArgumentOutOfRangeException for MaxConcurrentTasks of 0");
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return TestResult.Pass();
+            }
+            finally
+            {
+                queue.Dispose();
+            }
+        }
+
+        private static async Task<TestResult> Test_MaxQueueSizeInvalidThrows()
+        {
+            TaskQueue queue = new TaskQueue();
+
+            try
+            {
+                queue.MaxQueueSize = -5;
+                return TestResult.Fail("Should have thrown ArgumentOutOfRangeException for MaxQueueSize of -5");
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return TestResult.Pass();
+            }
+            finally
+            {
+                queue.Dispose();
+            }
+        }
+
+        private static async Task<TestResult> Test_StopAfterDisposeThrows()
+        {
+            TaskQueue queue = new TaskQueue();
+            queue.Dispose();
+
+            try
+            {
+                queue.Stop();
+                return TestResult.Fail("Should have thrown ObjectDisposedException");
+            }
+            catch (ObjectDisposedException)
+            {
+                return TestResult.Pass();
+            }
+        }
+
+        private static async Task<TestResult> Test_BoundedQueueOverflowThrows()
+        {
+            // Bounded queue of size 2, not started, so nothing drains the channel.
+            TaskQueue queue = new TaskQueue(1, 2);
+
+            try
+            {
+                queue.AddTask(Guid.NewGuid(), "T1", new Dictionary<string, object>(), async (CancellationToken token) => await Task.Delay(10, token));
+                queue.AddTask(Guid.NewGuid(), "T2", new Dictionary<string, object>(), async (CancellationToken token) => await Task.Delay(10, token));
+
+                try
+                {
+                    queue.AddTask(Guid.NewGuid(), "T3", new Dictionary<string, object>(), async (CancellationToken token) => await Task.Delay(10, token));
+                    return TestResult.Fail("Should have thrown InvalidOperationException when bounded queue is full");
+                }
+                catch (InvalidOperationException)
+                {
+                    return TestResult.Pass();
+                }
+            }
+            finally
+            {
+                queue.Dispose();
+            }
+        }
+
+        private static async Task<TestResult> Test_StopUnknownGuidGraceful()
+        {
+            TaskQueue queue = new TaskQueue();
+            queue.Start();
+
+            // Stopping a GUID that is not running should not throw.
+            queue.Stop(Guid.NewGuid());
+
+            await Task.Delay(50);
+            queue.Stop();
+            queue.Dispose();
+
+            return TestResult.Pass();
+        }
+
+        // =====================================================================
+        // Positive tests: async lifecycle and bounded queue behavior
+        // =====================================================================
+
+        private static async Task<TestResult> Test_EnqueueAsyncGenericTimeoutSuccess()
+        {
+            TaskQueue queue = new TaskQueue();
+            queue.Start();
+
+            TaskHandle<int> handle = await queue.EnqueueAsync(
+                "TimeoutSuccessTask",
+                async (CancellationToken token) =>
+                {
+                    await Task.Delay(100, token);
+                    return 42;
+                },
+                timeout: TimeSpan.FromSeconds(5));
+
+            int result = await handle.Task;
+
+            queue.Stop();
+            queue.Dispose();
+
+            if (result == 42)
+            {
+                return TestResult.Pass();
+            }
+            else
+            {
+                return TestResult.Fail($"Expected 42, got {result}");
+            }
+        }
+
+        private static async Task<TestResult> Test_StartAsyncStopAsyncLifecycle()
+        {
+            TaskQueue queue = new TaskQueue();
+            int executionCount = 0;
+
+            await queue.StartAsync();
+
+            await queue.EnqueueAsync(
+                "LifecycleTask",
+                async (CancellationToken token) =>
+                {
+                    Interlocked.Increment(ref executionCount);
+                    await Task.Delay(100, token);
+                });
+
+            await Task.Delay(400);
+            await queue.StopAsync(waitForCompletion: true);
+            queue.Dispose();
+
+            if (executionCount == 1)
+            {
+                return TestResult.Pass();
+            }
+            else
+            {
+                return TestResult.Fail($"Expected 1 execution, got {executionCount}");
+            }
+        }
+
+        private static async Task<TestResult> Test_DisposeAsyncCleanup()
+        {
+            TaskQueue queue = new TaskQueue();
+            bool wasCanceled = false;
+
+            queue.Start();
+
+            await queue.EnqueueAsync(
+                "LongRunningTask",
+                async (CancellationToken token) =>
+                {
+                    try
+                    {
+                        await Task.Delay(5000, token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        wasCanceled = true;
+                        throw;
+                    }
+                });
+
+            await Task.Delay(200);
+
+            // DisposeAsync should stop the queue, cancel running tasks, and wait for the runner.
+            await queue.DisposeAsync();
+            await Task.Delay(200);
+
+            if (wasCanceled)
+            {
+                return TestResult.Pass();
+            }
+            else
+            {
+                return TestResult.Fail("Running task was not canceled during DisposeAsync");
+            }
+        }
+
+        private static async Task<TestResult> Test_WaitForCompletionAsync()
+        {
+            TaskQueue queue = new TaskQueue(4);
+            int tasksToAdd = 20;
+
+            queue.Start();
+
+            for (int i = 0; i < tasksToAdd; i++)
+            {
+                await queue.EnqueueAsync(
+                    $"WaitTask{i}",
+                    async (CancellationToken token) => await Task.Delay(50, token));
+            }
+
+            await queue.WaitForCompletionAsync();
+
+            // WaitForCompletionAsync returns once the queue and running set are empty; the
+            // final completion continuations may still be settling, so allow a brief moment.
+            await Task.Delay(200);
+
+            TaskQueueStatistics stats = queue.GetStatistics();
+
+            queue.Stop();
+            queue.Dispose();
+
+            if (stats.TotalCompleted == tasksToAdd && stats.CurrentQueueDepth == 0)
+            {
+                return TestResult.Pass($"Completed {stats.TotalCompleted} tasks");
+            }
+            else
+            {
+                return TestResult.Fail($"Expected {tasksToAdd} completed with empty queue, got completed={stats.TotalCompleted}, depth={stats.CurrentQueueDepth}");
+            }
+        }
+
+        private static async Task<TestResult> Test_BoundedQueueProcessesAllTasks()
+        {
+            // Small bounded queue exercises backpressure via AddTaskAsync/EnqueueAsync WriteAsync.
+            TaskQueue queue = new TaskQueue(2, 5);
+            int completed = 0;
+
+            queue.OnTaskFinished += (sender, details) =>
+            {
+                Interlocked.Increment(ref completed);
+            };
+
+            queue.Start();
+
+            for (int i = 0; i < 20; i++)
+            {
+                await queue.AddTaskAsync(
+                    Guid.NewGuid(),
+                    $"BoundedTask{i}",
+                    new Dictionary<string, object>(),
+                    async (CancellationToken token) => await Task.Delay(20, token));
+            }
+
+            await queue.WaitForCompletionAsync();
+            await Task.Delay(200);
+
+            queue.Stop();
+            queue.Dispose();
+
+            if (completed == 20)
+            {
+                return TestResult.Pass();
+            }
+            else
+            {
+                return TestResult.Fail($"Expected 20 completed tasks, got {completed}");
+            }
+        }
+
+        private static async Task<TestResult> Test_TaskPriorityEnumOrdering()
+        {
+            // Lower numeric value means higher priority.
+            bool ordered =
+                (int)TaskPriority.Urgent == 0 &&
+                (int)TaskPriority.High == 1 &&
+                (int)TaskPriority.Normal == 2 &&
+                (int)TaskPriority.Low == 3 &&
+                (int)TaskPriority.Background == 4 &&
+                (int)TaskPriority.Urgent < (int)TaskPriority.Background;
+
+            if (ordered)
+            {
+                return TestResult.Pass();
+            }
+            else
+            {
+                return TestResult.Fail("TaskPriority enum values are not in the expected order");
             }
         }
     }

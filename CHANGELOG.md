@@ -1,6 +1,20 @@
 # Change Log
 
-## v2.0.x (Current)
+## v2.1.0 (Current)
+
+**Target Framework Update:**
+- Dropped .NET 6.0 target (out of support)
+- Added .NET 10.0 target
+- Now multi-targets netstandard2.0, netstandard2.1, net8.0, and net10.0
+- All automated tests passing on all target frameworks
+
+**Fixes:**
+- Fixed `WaitForCompletionAsync()` throwing `NotSupportedException` on the default unbounded queue (the single-reader unbounded channel does not support `Reader.Count`); it now uses the tracked queue depth
+
+**Testing:**
+- Expanded the automated suite to 53 tests, adding positive and negative coverage for input validation, bounded-queue backpressure, async start/stop/dispose lifecycle, and `WaitForCompletionAsync`
+
+## v2.0.x
 
 **Major Version with Breaking Changes:**
 

@@ -131,17 +131,19 @@ This documentation describes the v2.0.0 architecture.
 The library multi-targets:
 - netstandard2.0
 - netstandard2.1
-- net6.0
 - net8.0
+- net10.0
 
 When making changes, ensure compatibility across all target frameworks.
 
 ## Testing
 
-**Test.Automated** (src/Test.Automated/Program.cs) provides a comprehensive automated test suite with 38 tests covering:
+**Test.Automated** (src/Test.Automated/Program.cs) provides a comprehensive automated test suite with 53 tests covering:
 - Tests 1-20: Core functionality, concurrency, cancellation, error handling, race conditions
 - Tests 21-30: TaskHandle<T> with results, options pattern, priority, timeout, GetRunningTasksInfo
 - Tests 31-38: Statistics tracking, progress reporting
+- Tests 39-47: Negative cases - input validation, invalid configuration, misuse, bounded-queue overflow
+- Tests 48-53: Async lifecycle (StartAsync/StopAsync/DisposeAsync), WaitForCompletionAsync, bounded-queue backpressure, priority ordering
 
 Run all tests:
 ```bash
@@ -149,7 +151,7 @@ cd src/Test.Automated
 dotnet run
 ```
 
-All tests run on all target frameworks (netstandard2.0, netstandard2.1, net6.0, net8.0).
+All tests run on all target frameworks (netstandard2.0, netstandard2.1, net8.0, net10.0).
 
 **Test** (src/Test/Program.cs) provides an interactive console application demonstrating TaskQueue usage. It creates tasks with varying delays and allows starting/stopping via console commands.
 
@@ -284,4 +286,4 @@ public int MaxConcurrentTasks
 ### Compilation
 
 - Before committing changes, compile the code and ensure it is free of errors and warnings
-- Test across all target frameworks (netstandard2.0, netstandard2.1, net6.0, net8.0)
+- Test across all target frameworks (netstandard2.0, netstandard2.1, net8.0, net10.0)

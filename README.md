@@ -1267,15 +1267,15 @@ using (TaskQueue queue = new TaskQueue())
 TaskHandler targets multiple .NET frameworks:
 - .NET Standard 2.0
 - .NET Standard 2.1
-- .NET 6.0
 - .NET 8.0
+- .NET 10.0
 
 This ensures compatibility with:
 - .NET Core 2.0+
 - .NET Framework 4.6.1+
 - .NET 5.0+
-- .NET 6.0+
 - .NET 8.0+
+- .NET 10.0+
 - Xamarin
 - Unity (2021.2+)
 

@@ -831,7 +831,10 @@ namespace TaskHandler
         /// <returns>Task.</returns>
         public async Task WaitForCompletionAsync(CancellationToken cancellationToken = default)
         {
-            while (_queueChannel.Reader.Count > 0 || _RunningTasks.Count > 0)
+            // Note: use QueuedCount (tracked via Interlocked) rather than the channel reader's
+            // Count property. The default unbounded, single-reader channel is backed by
+            // SingleConsumerUnboundedChannel, whose Count property throws NotSupportedException.
+            while (QueuedCount > 0 || _RunningTasks.Count > 0)
             {
                 await Task.Delay(50, cancellationToken).ConfigureAwait(false);
             }

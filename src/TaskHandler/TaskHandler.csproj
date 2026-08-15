@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<Version>2.0.0</Version>
-		<TargetFrameworks>netstandard2.0;netstandard2.1;net6.0;net8.0</TargetFrameworks>
+		<Version>2.1.0</Version>
+		<TargetFrameworks>netstandard2.0;netstandard2.1;net8.0;net10.0</TargetFrameworks>
 		<LangVersion>8.0</LangVersion>
 		<ApplicationIcon>logo.ico</ApplicationIcon>
 		<GenerateDocumentationFile>True</GenerateDocumentationFile>
@@ -17,7 +17,7 @@
 		<RepositoryUrl>https://github.com/jchristn/TaskHandler</RepositoryUrl>
 		<RepositoryType>github</RepositoryType>
 		<PackageTags>task queue work scheduler</PackageTags>
-		<PackageReleaseNotes>v2.0.0: Event-driven architecture (10-100x faster), async API (StartAsync, StopAsync, DisposeAsync), task results (TaskHandle&lt;T&gt;), priorities, timeouts, statistics, progress reporting. BREAKING: Removed IterationDelayMs and QueuedTasks properties.</PackageReleaseNotes>
+		<PackageReleaseNotes>v2.1.0: Retargeted to net8.0 and net10.0 (dropped net6.0); still supports netstandard2.0 and netstandard2.1. v2.0.0: Event-driven architecture (10-100x faster), async API (StartAsync, StopAsync, DisposeAsync), task results (TaskHandle&lt;T&gt;), priorities, timeouts, statistics, progress reporting. BREAKING: Removed IterationDelayMs and QueuedTasks properties.</PackageReleaseNotes>
 		<PackageLicenseFile>LICENSE.md</PackageLicenseFile>
 		<IncludeSymbols>True</IncludeSymbols>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
