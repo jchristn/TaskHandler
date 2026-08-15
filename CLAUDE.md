@@ -138,24 +138,58 @@ When making changes, ensure compatibility across all target frameworks.
 
 ## Testing
 
-**Test.Automated** (src/Test.Automated/Program.cs) provides a comprehensive automated test suite with 53 tests covering:
-- Tests 1-20: Core functionality, concurrency, cancellation, error handling, race conditions
-- Tests 21-30: TaskHandle<T> with results, options pattern, priority, timeout, GetRunningTasksInfo
-- Tests 31-38: Statistics tracking, progress reporting
-- Tests 39-47: Negative cases - input validation, invalid configuration, misuse, bounded-queue overflow
-- Tests 48-53: Async lifecycle (StartAsync/StopAsync/DisposeAsync), WaitForCompletionAsync, bounded-queue backpressure, priority ordering
+Testing is built on **[Touchstone](https://github.com/jchristn/touchstone)**, a runner-agnostic test
+descriptor framework. Test cases are defined once and executed through multiple hosts.
 
-Run all tests:
-```bash
-cd src/Test.Automated
-dotnet run
-```
+**Test.Shared** (src/Test.Shared) is the single source of truth for the test corpus. It exposes
+`TaskHandlerSuites.All`, a set of `TestSuiteDescriptor` objects containing 110 exhaustive positive and
+negative test cases organized into suites:
+- Construction & configuration (constructors, options, Create factory, validation)
+- Property validation
+- Enqueue & execution (AddTask, AddTaskAsync, EnqueueAsync, high-throughput, bounded queue)
+- Concurrency control
+- Cancellation (individual, bulk, dispose)
+- Lifecycle (Start/Stop/StartAsync/StopAsync/Dispose/DisposeAsync, restart cycles, guard conditions)
+- Events (all lifecycle/task events, handler-exception safety, metadata)
+- TaskHandle&lt;T&gt; results and exception propagation
+- Statistics and metrics
+- Progress reporting
+- Task priority
+- TaskInfo snapshots
+- TaskProgress and TaskDetails value objects
+- TaskRunWithTimeout
 
-All tests run on all target frameworks (netstandard2.0, netstandard2.1, net8.0, net10.0).
+The `Check` helper (src/Test.Shared/Check.cs) provides assertions; a failed assertion throws
+`AssertionException`, which Touchstone reports as a failed test.
 
-**Test** (src/Test/Program.cs) provides an interactive console application demonstrating TaskQueue usage. It creates tasks with varying delays and allows starting/stopping via console commands.
+The corpus is executed through three hosts, all consuming `TaskHandlerSuites.All`:
 
-**Test.RunWithTimeout** and **Test.RunWithTimeoutHttp** test timeout functionality for the TaskRunWithTimeout utility.
+- **Test.Automated** (src/Test.Automated) — Touchstone CLI runner. Colored tabular output and a
+  CI-friendly exit code. Optionally pass a path argument to export JSON results.
+  ```bash
+  cd src/Test.Automated
+  dotnet run                       # runs the full corpus
+  dotnet run -- results.json       # also exports JSON
+  ```
+- **Test.Xunit** (src/Test.Xunit) — Touchstone xUnit adapter (theory-driven; one xUnit test per case).
+  ```bash
+  dotnet test src/Test.Xunit/Test.Xunit.csproj
+  ```
+- **Test.Nunit** (src/Test.Nunit) — Touchstone NUnit adapter (TestCaseSource; one NUnit test per case).
+  ```bash
+  dotnet test src/Test.Nunit/Test.Nunit.csproj
+  ```
+
+Test.Shared and the three hosts target net8.0 and net10.0 (the frameworks supported by Touchstone).
+When adding or changing tests, edit **Test.Shared only** — all three runners pick up the change
+automatically.
+
+The following are interactive console applications (not part of the automated corpus) and are retained
+for manual, hands-on use of the system:
+
+- **Test** (src/Test/Program.cs) — interactive menu demonstrating TaskQueue usage (add/start/stop/monitor).
+- **Test.RunWithTimeout** and **Test.RunWithTimeoutHttp** — interactive tools exercising the
+  TaskRunWithTimeout utility (the HTTP variant issues real requests against a user-supplied URL).
 
 ## Coding Standards
 

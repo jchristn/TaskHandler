@@ -1,18 +1,19 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<OutputType>Exe</OutputType>
 		<TargetFrameworks>net8.0;net10.0</TargetFrameworks>
 		<Nullable>enable</Nullable>
 		<LangVersion>latest</LangVersion>
+		<ImplicitUsings>disable</ImplicitUsings>
+		<GenerateDocumentationFile>false</GenerateDocumentationFile>
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Touchstone.Cli" Version="0.1.12" />
+		<PackageReference Include="Touchstone.Core" Version="0.1.12" />
 	</ItemGroup>
 
 	<ItemGroup>
-		<ProjectReference Include="..\Test.Shared\Test.Shared.csproj" />
+		<ProjectReference Include="..\TaskHandler\TaskHandler.csproj" />
 	</ItemGroup>
 
 </Project>
