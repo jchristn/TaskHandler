@@ -201,6 +201,44 @@ namespace Test.Shared
                             "third AddTask on full bounded queue");
                     }
                     await Task.CompletedTask;
+                }),
+
+                TaskHandlerSuites.Case(Id, "EnqueueTimeoutFaults", "EnqueueAsync (no result) exceeding its timeout faults and counts as failed", async ct =>
+                {
+                    using (TaskQueue queue = new TaskQueue())
+                    {
+                        bool faulted = false;
+                        queue.OnTaskFaulted += (s, d) => faulted = true;
+                        queue.Start();
+                        await queue.EnqueueAsync("SlowVoid", async token =>
+                        {
+                            await Task.Delay(5000, token);
+                        }, priority: 0, timeout: TimeSpan.FromMilliseconds(150));
+
+                        Check.True(await Check.WaitUntilAsync(() => faulted), "OnTaskFaulted should fire on timeout");
+                        Check.True(await Check.WaitUntilAsync(() => queue.GetStatistics().TotalFailed >= 1), "TotalFailed should increment on timeout");
+                        queue.Stop();
+                    }
+                }),
+
+                TaskHandlerSuites.Case(Id, "EnqueueWithinTimeoutFinishes", "EnqueueAsync (no result) completing before its timeout finishes normally", async ct =>
+                {
+                    using (TaskQueue queue = new TaskQueue())
+                    {
+                        bool finished = false;
+                        bool faulted = false;
+                        queue.OnTaskFinished += (s, d) => finished = true;
+                        queue.OnTaskFaulted += (s, d) => faulted = true;
+                        queue.Start();
+                        await queue.EnqueueAsync("QuickVoid", async token =>
+                        {
+                            await Task.Delay(30, token);
+                        }, priority: 0, timeout: TimeSpan.FromSeconds(5));
+
+                        Check.True(await Check.WaitUntilAsync(() => finished), "OnTaskFinished should fire within timeout");
+                        Check.False(faulted, "task should not fault when it completes within the timeout");
+                        queue.Stop();
+                    }
                 })
             };
 

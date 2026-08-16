@@ -102,6 +102,66 @@ namespace Test.Shared
                             "EnqueueAsync<int>(name, null)");
                         queue.Stop();
                     }
+                }),
+
+                TaskHandlerSuites.Case(Id, "HandleWithinTimeoutReturnsResult", "EnqueueAsync<T> with a generous timeout returns the result", async ct =>
+                {
+                    using (TaskQueue queue = new TaskQueue())
+                    {
+                        queue.Start();
+                        TaskHandle<int> handle = await queue.EnqueueAsync<int>("QuickWithTimeout", async token =>
+                        {
+                            await Task.Delay(30, token);
+                            return 7;
+                        }, priority: 0, timeout: TimeSpan.FromSeconds(5));
+                        Check.Equal(7, await handle.Task, "result within timeout");
+                        queue.Stop();
+                    }
+                }),
+
+                TaskHandlerSuites.Case(Id, "HandleTimesOutWithTimeoutException", "EnqueueAsync<T> exceeding its timeout completes the handle with TimeoutException", async ct =>
+                {
+                    using (TaskQueue queue = new TaskQueue())
+                    {
+                        queue.Start();
+                        TaskHandle<int> handle = await queue.EnqueueAsync<int>("SlowWithTimeout", async token =>
+                        {
+                            await Task.Delay(5000, token);
+                            return 1;
+                        }, priority: 0, timeout: TimeSpan.FromMilliseconds(150));
+
+                        await Check.ThrowsAsync<TimeoutException>(async () => await handle.Task, "awaiting a timed-out handle");
+                        queue.Stop();
+                    }
+                }),
+
+                TaskHandlerSuites.Case(Id, "HandleExternalCancellationStillCancels", "External Stop() cancels a handle task that observes its token", async ct =>
+                {
+                    using (TaskQueue queue = new TaskQueue())
+                    {
+                        bool started = false;
+                        queue.OnTaskStarted = (s, d) => started = true;
+                        queue.Start();
+                        TaskHandle<int> handle = await queue.EnqueueAsync<int>("CancelMe", async token =>
+                        {
+                            await Task.Delay(5000, token);
+                            return 1;
+                        });
+
+                        Check.True(await Check.WaitUntilAsync(() => started), "task should start");
+                        queue.Stop();
+
+                        bool canceled = false;
+                        try
+                        {
+                            await handle.Task;
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            canceled = true;
+                        }
+                        Check.True(canceled, "handle should surface cancellation");
+                    }
                 })
             };
 

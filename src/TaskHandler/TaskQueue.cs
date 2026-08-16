@@ -470,13 +470,30 @@ namespace TaskHandler
 
             TaskHandle<T> handle = new TaskHandle<T>(Guid.NewGuid(), name);
 
-            // Wrap function to capture result
+            // Wrap function to capture result, applying an optional timeout in the same wrapper
+            // so the handle is completed exactly once with the correct terminal state.
             Func<CancellationToken, Task> wrappedFunc = async (CancellationToken token) =>
             {
+                CancellationTokenSource timeoutCts = null;
+                CancellationToken effectiveToken = token;
+
+                if (timeout.HasValue)
+                {
+                    timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    timeoutCts.CancelAfter(timeout.Value);
+                    effectiveToken = timeoutCts.Token;
+                }
+
                 try
                 {
-                    T result = await func(token).ConfigureAwait(false);
+                    T result = await func(effectiveToken).ConfigureAwait(false);
                     handle.SetResult(result);
+                }
+                catch (OperationCanceledException) when (timeout.HasValue && timeoutCts.IsCancellationRequested && !token.IsCancellationRequested)
+                {
+                    TimeoutException tex = new TimeoutException($"Task '{name}' timed out after {timeout.Value.TotalSeconds}s");
+                    handle.SetException(tex);
+                    throw tex;
                 }
                 catch (OperationCanceledException)
                 {
@@ -488,31 +505,11 @@ namespace TaskHandler
                     handle.SetException(ex);
                     throw;
                 }
-            };
-
-            // Apply timeout if specified
-            if (timeout.HasValue)
-            {
-                Func<CancellationToken, Task> originalFunc = wrappedFunc;
-                wrappedFunc = async (CancellationToken token) =>
+                finally
                 {
-                    using (CancellationTokenSource timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token))
-                    {
-                        timeoutCts.CancelAfter(timeout.Value);
-
-                        try
-                        {
-                            await originalFunc(timeoutCts.Token).ConfigureAwait(false);
-                        }
-                        catch (OperationCanceledException) when (!token.IsCancellationRequested)
-                        {
-                            TimeoutException tex = new TimeoutException($"Task '{name}' timed out after {timeout.Value.TotalSeconds}s");
-                            handle.SetException(tex);
-                            throw tex;
-                        }
-                    }
-                };
-            }
+                    timeoutCts?.Dispose();
+                }
+            };
 
             TaskDetails details = await AddTaskAsync(handle.Id, name, null, wrappedFunc, cancellationToken).ConfigureAwait(false);
             details.Priority = priority;
@@ -543,13 +540,30 @@ namespace TaskHandler
 
             TaskHandle<T> handle = new TaskHandle<T>(Guid.NewGuid(), name);
 
-            // Wrap function to capture result and provide progress
+            // Wrap function to capture result and provide progress, applying an optional timeout in
+            // the same wrapper so the handle is completed exactly once with the correct terminal state.
             Func<CancellationToken, Task> wrappedFunc = async (CancellationToken token) =>
             {
+                CancellationTokenSource timeoutCts = null;
+                CancellationToken effectiveToken = token;
+
+                if (timeout.HasValue)
+                {
+                    timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    timeoutCts.CancelAfter(timeout.Value);
+                    effectiveToken = timeoutCts.Token;
+                }
+
                 try
                 {
-                    T result = await func(token, progress).ConfigureAwait(false);
+                    T result = await func(effectiveToken, progress).ConfigureAwait(false);
                     handle.SetResult(result);
+                }
+                catch (OperationCanceledException) when (timeout.HasValue && timeoutCts.IsCancellationRequested && !token.IsCancellationRequested)
+                {
+                    TimeoutException tex = new TimeoutException($"Task '{name}' timed out after {timeout.Value.TotalSeconds}s");
+                    handle.SetException(tex);
+                    throw tex;
                 }
                 catch (OperationCanceledException)
                 {
@@ -561,31 +575,11 @@ namespace TaskHandler
                     handle.SetException(ex);
                     throw;
                 }
-            };
-
-            // Apply timeout if specified
-            if (timeout.HasValue)
-            {
-                Func<CancellationToken, Task> originalFunc = wrappedFunc;
-                wrappedFunc = async (CancellationToken token) =>
+                finally
                 {
-                    using (CancellationTokenSource timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token))
-                    {
-                        timeoutCts.CancelAfter(timeout.Value);
-
-                        try
-                        {
-                            await originalFunc(timeoutCts.Token).ConfigureAwait(false);
-                        }
-                        catch (OperationCanceledException) when (!token.IsCancellationRequested)
-                        {
-                            TimeoutException tex = new TimeoutException($"Task '{name}' timed out after {timeout.Value.TotalSeconds}s");
-                            handle.SetException(tex);
-                            throw tex;
-                        }
-                    }
-                };
-            }
+                    timeoutCts?.Dispose();
+                }
+            };
 
             TaskDetails details = await AddTaskAsync(handle.Id, name, null, wrappedFunc, cancellationToken).ConfigureAwait(false);
             details.Priority = priority;

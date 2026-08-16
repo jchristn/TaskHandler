@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<Version>2.1.0</Version>
+		<Version>2.1.1</Version>
 		<TargetFrameworks>netstandard2.0;netstandard2.1;net8.0;net10.0</TargetFrameworks>
 		<LangVersion>8.0</LangVersion>
 		<ApplicationIcon>logo.ico</ApplicationIcon>
@@ -17,7 +17,7 @@
 		<RepositoryUrl>https://github.com/jchristn/TaskHandler</RepositoryUrl>
 		<RepositoryType>github</RepositoryType>
 		<PackageTags>task queue work scheduler</PackageTags>
-		<PackageReleaseNotes>v2.1.0: Retargeted to net8.0 and net10.0 (dropped net6.0); still supports netstandard2.0 and netstandard2.1. v2.0.0: Event-driven architecture (10-100x faster), async API (StartAsync, StopAsync, DisposeAsync), task results (TaskHandle&lt;T&gt;), priorities, timeouts, statistics, progress reporting. BREAKING: Removed IterationDelayMs and QueuedTasks properties.</PackageReleaseNotes>
+		<PackageReleaseNotes>v2.1.1: Fixed result-returning EnqueueAsync&lt;T&gt; overloads so that a task exceeding its timeout completes the TaskHandle&lt;T&gt; with a TimeoutException (previously it double-completed the handle, surfacing a cancellation plus an InvalidOperationException fault). Hardened TaskHandle&lt;T&gt; completion to be idempotent. Updated System.Threading.Channels and Microsoft.Bcl.AsyncInterfaces to 10.0.11. v2.1.0: Retargeted to net8.0 and net10.0 (dropped net6.0); still supports netstandard2.0 and netstandard2.1. v2.0.0: Event-driven architecture (10-100x faster), async API (StartAsync, StopAsync, DisposeAsync), task results (TaskHandle&lt;T&gt;), priorities, timeouts, statistics, progress reporting. BREAKING: Removed IterationDelayMs and QueuedTasks properties.</PackageReleaseNotes>
 		<PackageLicenseFile>LICENSE.md</PackageLicenseFile>
 		<IncludeSymbols>True</IncludeSymbols>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
@@ -29,11 +29,11 @@
 	</ItemGroup>
 
 	<ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0' OR '$(TargetFramework)' == 'netstandard2.1'">
-	  <PackageReference Include="System.Threading.Channels" Version="8.0.0" />
+	  <PackageReference Include="System.Threading.Channels" Version="10.0.11" />
 	</ItemGroup>
 
 	<ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
-	  <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
+	  <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.11" />
 	</ItemGroup>
 
 	<ItemGroup>

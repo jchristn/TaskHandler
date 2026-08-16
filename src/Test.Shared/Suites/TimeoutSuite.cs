@@ -102,6 +102,70 @@ namespace Test.Shared
                     {
                         TaskRunWithTimeout.Logger = previous;
                     }
+                }),
+
+                TaskHandlerSuites.Case(Id, "LogHeaderCustomApplied", "Custom LogHeader is prepended to emitted log messages", async ct =>
+                {
+                    List<string> logs = new List<string>();
+                    Action<string>? previousLogger = TaskRunWithTimeout.Logger;
+                    string previousHeader = TaskRunWithTimeout.LogHeader;
+                    try
+                    {
+                        TaskRunWithTimeout.LogHeader = "[Custom] ";
+                        TaskRunWithTimeout.Logger = msg => { lock (logs) { logs.Add(msg); } };
+                        CancellationTokenSource cts = new CancellationTokenSource();
+                        Func<CancellationToken, Task<string>> task = async token =>
+                        {
+                            await Task.Delay(20, token);
+                            return "ok";
+                        };
+                        await TaskRunWithTimeout.Go(task(cts.Token), 1000, cts);
+
+                        List<string> snapshot;
+                        lock (logs) { snapshot = new List<string>(logs); }
+                        Check.True(snapshot.Count > 0, "logger should have been invoked");
+                        foreach (string line in snapshot)
+                        {
+                            Check.True(line.StartsWith("[Custom] "), "each log line should start with the custom header: '" + line + "'");
+                        }
+                    }
+                    finally
+                    {
+                        TaskRunWithTimeout.Logger = previousLogger;
+                        TaskRunWithTimeout.LogHeader = previousHeader;
+                    }
+                }),
+
+                TaskHandlerSuites.Case(Id, "LogHeaderAppendsSpaceWhenMissing", "LogHeader without a trailing space has one appended before the message", async ct =>
+                {
+                    List<string> logs = new List<string>();
+                    Action<string>? previousLogger = TaskRunWithTimeout.Logger;
+                    string previousHeader = TaskRunWithTimeout.LogHeader;
+                    try
+                    {
+                        TaskRunWithTimeout.LogHeader = "[NoSpace]";
+                        TaskRunWithTimeout.Logger = msg => { lock (logs) { logs.Add(msg); } };
+                        CancellationTokenSource cts = new CancellationTokenSource();
+                        Func<CancellationToken, Task<string>> task = async token =>
+                        {
+                            await Task.Delay(20, token);
+                            return "ok";
+                        };
+                        await TaskRunWithTimeout.Go(task(cts.Token), 1000, cts);
+
+                        List<string> snapshot;
+                        lock (logs) { snapshot = new List<string>(logs); }
+                        Check.True(snapshot.Count > 0, "logger should have been invoked");
+                        foreach (string line in snapshot)
+                        {
+                            Check.True(line.StartsWith("[NoSpace] "), "header should have a space appended: '" + line + "'");
+                        }
+                    }
+                    finally
+                    {
+                        TaskRunWithTimeout.Logger = previousLogger;
+                        TaskRunWithTimeout.LogHeader = previousHeader;
+                    }
                 })
             };
 

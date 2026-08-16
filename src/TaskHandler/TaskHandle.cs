@@ -32,8 +32,8 @@ namespace TaskHandler
             Name = name;
         }
 
-        internal void SetResult(T result) => _Tcs.SetResult(result);
-        internal void SetException(Exception ex) => _Tcs.SetException(ex);
-        internal void SetCanceled() => _Tcs.SetCanceled();
+        internal void SetResult(T result) => _Tcs.TrySetResult(result);
+        internal void SetException(Exception ex) => _Tcs.TrySetException(ex);
+        internal void SetCanceled() => _Tcs.TrySetCanceled();
     }
 }
