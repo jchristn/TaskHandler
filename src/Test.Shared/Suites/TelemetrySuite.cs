@@ -262,7 +262,7 @@ namespace Test.Shared
                     }
                 }),
 
-                TaskHandlerSuites.Case(Id, "DroppedPath", "A dequeued task still waiting for a slot when the queue stops is recorded as dropped", async ct =>
+                TaskHandlerSuites.Case(Id, "DroppedPath", "Stop() retains unstarted tasks without a dropped outcome; Dispose() drops them from both the queue and the slot wait", async ct =>
                 {
                     using (TelemetryCapture capture = new TelemetryCapture())
                     {
@@ -274,22 +274,66 @@ namespace Test.Shared
                         await queue.EnqueueAsync("holder", async token => await Task.Delay(400));
                         Check.True(await Check.WaitUntilAsync(() => queue.RunningCount == 1), "holder running");
                         await queue.EnqueueAsync("waiter", async token => await Task.Delay(10, token));
-                        Check.True(await Check.WaitUntilAsync(() => queue.QueuedCount == 0), "waiter dequeued and waiting for a slot");
+                        Check.True(await Check.WaitUntilAsync(() =>
+                            capture.Measurements(TaskHandlerTelemetryNames.StageEvents, queueName)
+                                .Count(m => m.Tag(TaskHandlerTelemetryNames.AttrStage) == TaskHandlerTelemetryNames.StageQueued) == 2),
+                            "waiter read from the queue and waiting for a slot");
 
                         queue.Stop();
+                        await queue.EnqueueAsync("queued", async token => await Task.Delay(10, token));
+                        await Task.Delay(100);
 
-                        Check.True(await Check.WaitUntilAsync(() =>
-                            capture.Count(TaskHandlerTelemetryNames.TasksCompleted, queueName, TaskHandlerTelemetryNames.AttrOutcome, TaskHandlerTelemetryNames.OutcomeDropped) >= 1),
-                            "dropped recorded");
-                        Check.Equal(1, capture.Count(TaskHandlerTelemetryNames.StageEvents, queueName, TaskHandlerTelemetryNames.AttrOutcome, TaskHandlerTelemetryNames.OutcomeDropped), "slot_wait stage dropped");
+                        Check.Equal(0, capture.Count(TaskHandlerTelemetryNames.TasksCompleted, queueName, TaskHandlerTelemetryNames.AttrOutcome, TaskHandlerTelemetryNames.OutcomeDropped), "nothing dropped by Stop()");
+                        Check.Equal(2, queue.QueuedCount, "waiter and queued are retained");
 
-                        Activity dropped = capture.Spans(TaskHandlerTelemetryNames.SpanTask, queueName)
-                            .Single(a => (a.GetTagItem(TaskHandlerTelemetryNames.AttrOutcome) as string) == TaskHandlerTelemetryNames.OutcomeDropped);
-                        Check.Equal(ActivityStatusCode.Error, dropped.Status, "dropped job span status");
-                        Check.Equal("waiter", dropped.GetTagItem(TaskHandlerTelemetryNames.AttrTaskName) as string, "dropped task name on span");
+                        queue.Dispose();
+
+                        Check.Equal(2, capture.Count(TaskHandlerTelemetryNames.TasksCompleted, queueName, TaskHandlerTelemetryNames.AttrOutcome, TaskHandlerTelemetryNames.OutcomeDropped), "both dropped by Dispose()");
+                        List<CapturedMeasurement> droppedStages = capture.Measurements(TaskHandlerTelemetryNames.StageEvents, queueName)
+                            .Where(m => m.Tag(TaskHandlerTelemetryNames.AttrOutcome) == TaskHandlerTelemetryNames.OutcomeDropped)
+                            .ToList();
+                        Check.Equal(1, droppedStages.Count(m => m.Tag(TaskHandlerTelemetryNames.AttrStage) == TaskHandlerTelemetryNames.StageSlotWait), "slot_wait stage dropped");
+                        Check.Equal(1, droppedStages.Count(m => m.Tag(TaskHandlerTelemetryNames.AttrStage) == TaskHandlerTelemetryNames.StageQueued), "queued stage dropped");
+                        Check.True(capture.Measurements(TaskHandlerTelemetryNames.TasksCompleted, queueName)
+                            .Where(m => m.Tag(TaskHandlerTelemetryNames.AttrOutcome) == TaskHandlerTelemetryNames.OutcomeDropped)
+                            .All(m => m.Tag(TaskHandlerTelemetryNames.AttrErrorType) == TaskHandlerTelemetryNames.ErrorQueueClosed), "dropped error.type is queue_closed");
+
+                        List<Activity> dropped = capture.Spans(TaskHandlerTelemetryNames.SpanTask, queueName)
+                            .Where(a => (a.GetTagItem(TaskHandlerTelemetryNames.AttrOutcome) as string) == TaskHandlerTelemetryNames.OutcomeDropped)
+                            .ToList();
+                        Check.Equal(2, dropped.Count, "dropped job spans");
+                        Check.True(dropped.All(a => a.Status == ActivityStatusCode.Error), "dropped job span status");
+                        Check.True(dropped.Any(a => (a.GetTagItem(TaskHandlerTelemetryNames.AttrTaskName) as string) == "waiter"), "waiter span");
+                        Check.True(dropped.Any(a => (a.GetTagItem(TaskHandlerTelemetryNames.AttrTaskName) as string) == "queued"), "never-dequeued task still gets a job span");
+                        Activity waiterJob = dropped.Single(a => (a.GetTagItem(TaskHandlerTelemetryNames.AttrTaskName) as string) == "waiter");
+                        Activity waiterSlot = capture.ChildSpans(TaskHandlerTelemetryNames.SpanStageSlotWait, waiterJob.SpanId).Single();
+                        Check.Equal(ActivityStatusCode.Error, waiterSlot.Status, "interrupted slot_wait span closed with Error");
 
                         await Task.Delay(500);
-                        queue.Dispose();
+                    }
+                }),
+
+                TaskHandlerSuites.Case(Id, "CancelQueuedTaskPath", "Stop(guid) on a task still in the queue records a stop_task request and a canceled outcome without running it", async ct =>
+                {
+                    using (TelemetryCapture capture = new TelemetryCapture())
+                    {
+                        string queueName = NewQueueName();
+                        using (TaskQueue queue = TaskQueue.Create(o => { o.Name = queueName; o.MaxConcurrentTasks = 1; }))
+                        {
+                            bool ran = false;
+                            Guid guid = await queue.EnqueueAsync("victim", async token => { ran = true; await Task.Delay(10, token); });
+                            queue.Stop(guid);
+                            queue.Start();
+
+                            Check.True(await Check.WaitUntilAsync(() =>
+                                capture.Count(TaskHandlerTelemetryNames.TasksCompleted, queueName, TaskHandlerTelemetryNames.AttrOutcome, TaskHandlerTelemetryNames.OutcomeCanceled) == 1),
+                                "canceled outcome recorded");
+                            Check.False(ran, "canceled queued task must not run");
+                            Check.Equal(1, capture.Count(TaskHandlerTelemetryNames.CancellationRequests, queueName, TaskHandlerTelemetryNames.AttrCancelReason, TaskHandlerTelemetryNames.CancelReasonStopTask), "stop_task request");
+                            Activity job = capture.Spans(TaskHandlerTelemetryNames.SpanTask, queueName).Single();
+                            Check.Equal(TaskHandlerTelemetryNames.OutcomeCanceled, job.GetTagItem(TaskHandlerTelemetryNames.AttrOutcome) as string, "job span outcome");
+                            Check.Equal(0, queue.QueuedCount, "queue empty");
+                        }
                     }
                 }),
 
@@ -316,7 +360,7 @@ namespace Test.Shared
 
                         capture.RecordObservables();
                         Check.Equal(2.0, capture.Latest(TaskHandlerTelemetryNames.ConcurrencyInUse, queueName), "in use at limit");
-                        Check.Equal(0.0, capture.Latest(TaskHandlerTelemetryNames.QueueDepth, queueName), "depth after dequeue");
+                        Check.Equal(1.0, capture.Latest(TaskHandlerTelemetryNames.QueueDepth, queueName), "depth counts the task waiting for a slot");
                         Check.Equal(1.0, capture.Latest(TaskHandlerTelemetryNames.QueueProcessing, queueName), "processing");
 
                         release.SetResult(true);

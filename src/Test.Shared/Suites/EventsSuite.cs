@@ -94,6 +94,59 @@ namespace Test.Shared
                     }
                 }),
 
+                TaskHandlerSuites.Case(Id, "OneTerminalEventPerTask", "Each task raises exactly one terminal event, including tasks canceled by Stop(guid) and Stop()", async ct =>
+                {
+                    int canceled = 0;
+                    int finished = 0;
+                    using (TaskQueue queue = new TaskQueue())
+                    {
+                        queue.OnTaskCanceled += (s, d) => Interlocked.Increment(ref canceled);
+                        queue.OnTaskFinished += (s, d) => Interlocked.Increment(ref finished);
+                        queue.Start();
+
+                        Guid one = await queue.EnqueueAsync("by-guid", async token => await Task.Delay(10000, token));
+                        await queue.EnqueueAsync("by-stop", async token => await Task.Delay(10000, token));
+                        await queue.EnqueueAsync("swallows", async token =>
+                        {
+                            try { await Task.Delay(10000, token); } catch (OperationCanceledException) { }
+                        });
+                        Check.True(await Check.WaitUntilAsync(() => queue.RunningCount == 3), "all running");
+
+                        queue.Stop(one);
+                        Check.True(await Check.WaitUntilAsync(() => Volatile.Read(ref canceled) == 1), "Stop(guid) canceled event");
+                        queue.Stop();
+                        Check.True(await Check.WaitUntilAsync(() => queue.RunningCount == 0), "all ended");
+                        await Task.Delay(100);
+
+                        Check.Equal(2, Volatile.Read(ref canceled), "OnTaskCanceled once each for the two canceled tasks");
+                        Check.Equal(1, Volatile.Read(ref finished), "a task that swallows cancellation finishes");
+                    }
+                }),
+
+                TaskHandlerSuites.Case(Id, "OnProcessingStoppedOncePerStop", "OnProcessingStopped fires once per Stop(), once on Dispose of a started queue, and not on Dispose of a stopped queue", async ct =>
+                {
+                    int stopped = 0;
+                    TaskQueue queue = new TaskQueue();
+                    queue.OnProcessingStopped += (s, e) => Interlocked.Increment(ref stopped);
+
+                    queue.Start();
+                    queue.Stop();
+                    await Task.Delay(150);
+                    Check.Equal(1, Volatile.Read(ref stopped), "once for Stop()");
+
+                    queue.Dispose();
+                    await Task.Delay(100);
+                    Check.Equal(1, Volatile.Read(ref stopped), "not again for Dispose of a stopped queue");
+
+                    TaskQueue started = new TaskQueue();
+                    int startedStops = 0;
+                    started.OnProcessingStopped += (s, e) => Interlocked.Increment(ref startedStops);
+                    started.Start();
+                    started.Dispose();
+                    await Task.Delay(150);
+                    Check.Equal(1, Volatile.Read(ref startedStops), "once for Dispose of a started queue");
+                }),
+
                 TaskHandlerSuites.Case(Id, "OnProcessingStartedFires", "OnProcessingStarted fires on Start", async ct =>
                 {
                     bool fired = false;

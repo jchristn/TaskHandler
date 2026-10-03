@@ -164,25 +164,66 @@ namespace Test.Shared
                     }
                 }),
 
-                TaskHandlerSuites.Case(Id, "HandleCompletesWhenDroppedBeforeStart", "A result task that never starts because the queue stopped completes its handle as canceled", async ct =>
+                TaskHandlerSuites.Case(Id, "HandleSurvivesStopAndCompletesAfterRestart", "A result task that has not started when the queue stops stays pending and completes after restart", async ct =>
+                {
+                    using (TaskQueue queue = new TaskQueue(maxConcurrentTasks: 1))
+                    {
+                        queue.Start();
+
+                        // The holder ignores cancellation so the only slot stays held after Stop().
+                        await queue.EnqueueAsync("holder", async token => await Task.Delay(300));
+                        Check.True(await Check.WaitUntilAsync(() => queue.RunningCount == 1), "holder should start");
+                        TaskHandle<int> handle = await queue.EnqueueAsync<int>("waits", token => Task.FromResult(42));
+                        await Task.Delay(50);
+
+                        queue.Stop();
+                        await Task.Delay(500);
+                        Check.False(handle.Task.IsCompleted, "handle stays pending while stopped");
+
+                        queue.Start();
+                        Task completed = await Task.WhenAny(handle.Task, Task.Delay(5000));
+                        Check.True(completed == handle.Task, "handle should complete after restart");
+                        Check.Equal(42, await handle.Task, "result after restart");
+                    }
+                }),
+
+                TaskHandlerSuites.Case(Id, "HandleCanceledWhenDisposedBeforeStart", "A result task that never starts because the queue is disposed completes its handle as canceled", async ct =>
                 {
                     TaskQueue queue = new TaskQueue(maxConcurrentTasks: 1);
                     queue.Start();
 
-                    // The holder ignores cancellation so the only slot stays held after Stop().
+                    // The holder ignores cancellation so the only slot stays held, leaving one task waiting for a
+                    // slot and one still in the queue.
                     await queue.EnqueueAsync("holder", async token => await Task.Delay(300));
                     Check.True(await Check.WaitUntilAsync(() => queue.RunningCount == 1), "holder should start");
-                    TaskHandle<int> handle = await queue.EnqueueAsync<int>("never-runs", token => Task.FromResult(1));
-                    Check.True(await Check.WaitUntilAsync(() => queue.QueuedCount == 0), "result task dequeued and waiting for a slot");
+                    TaskHandle<int> waiting = await queue.EnqueueAsync<int>("waiting", token => Task.FromResult(1));
+                    TaskHandle<int> queued = await queue.EnqueueAsync<int>("queued", token => Task.FromResult(2));
+                    await Task.Delay(50);
 
-                    queue.Stop();
-
-                    Task completed = await Task.WhenAny(handle.Task, Task.Delay(5000));
-                    Check.True(completed == handle.Task, "handle should complete instead of hanging");
-                    Check.True(handle.Task.IsCanceled, "handle should be canceled");
-
-                    await Task.Delay(400);
                     queue.Dispose();
+
+                    Task all = Task.WhenAll(waiting.Task, queued.Task);
+                    Task completed = await Task.WhenAny(all, Task.Delay(5000));
+                    Check.True(completed == all, "handles should complete instead of hanging");
+                    Check.True(waiting.Task.IsCanceled, "slot-waiting handle should be canceled");
+                    Check.True(queued.Task.IsCanceled, "queued handle should be canceled");
+                    await Task.Delay(400);
+                }),
+
+                TaskHandlerSuites.Case(Id, "HandleCanceledByStopGuidBeforeStart", "Stop(guid) on a result task that has not started cancels its handle immediately and the task never runs", async ct =>
+                {
+                    bool ran = false;
+                    using (TaskQueue queue = new TaskQueue())
+                    {
+                        TaskHandle<int> handle = await queue.EnqueueAsync<int>("never", token => { ran = true; return Task.FromResult(1); });
+                        queue.Stop(handle.Id);
+                        Check.True(handle.Task.IsCanceled, "handle canceled immediately");
+
+                        queue.Start();
+                        Check.True(await Check.WaitUntilAsync(() => queue.GetStatistics().TotalCanceled == 1), "counted as canceled");
+                        Check.False(ran, "function never runs");
+                        Check.Equal(0, queue.QueuedCount, "queue empty");
+                    }
                 })
             };
 

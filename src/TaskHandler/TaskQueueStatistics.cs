@@ -28,13 +28,15 @@ namespace TaskHandler
         public long TotalFailed { get; internal set; } = 0;
 
         /// <summary>
-        /// Total number of tasks that were canceled.
+        /// Total number of tasks that were canceled, including tasks dropped because the queue was disposed before
+        /// they started.
         /// Default: 0.
         /// </summary>
         public long TotalCanceled { get; internal set; } = 0;
 
         /// <summary>
-        /// Current number of tasks waiting in the queue.
+        /// Current number of tasks accepted but not yet started, including tasks waiting for a concurrency slot and
+        /// tasks retained while the queue is stopped.
         /// Default: 0.
         /// </summary>
         public int CurrentQueueDepth { get; internal set; } = 0;

@@ -1,6 +1,37 @@
 # Change Log
 
-## v2.2.0 (Current)
+## v2.3.0 (Current)
+
+Lifecycle fixes. `Stop()` now pauses the queue instead of half-closing it, `Dispose()` settles every task, and events fire once per task. Review the behavior changes below if you depend on the old event timing.
+
+**Behavior changes:**
+- `Stop()` keeps tasks that have not started, including the one already waiting for a concurrency slot (previously dropped), and they run after the next `Start()` in the order added. Tasks can be added while stopped, as they could before the first `Start()`
+- `Dispose()` drops tasks that have not started and completes each as canceled: its `TaskHandle<T>` is canceled, `OnTaskCanceled` fires, and it counts in `TotalCanceled`. Previously queued tasks vanished with no event, and awaiting their handles hung forever
+- Each task raises exactly one of `OnTaskFinished`, `OnTaskFaulted`, or `OnTaskCanceled`. `Stop()` and `Stop(guid)` no longer raise `OnTaskCanceled` at the moment of the request; the event fires when the task ends canceled. A task whose function catches cancellation and returns normally raises `OnTaskFinished`
+- `OnProcessingStopped` fires once per `Stop()` (previously twice), on `Dispose()` of a started queue, or if the runner fails
+- `Stop(guid)` also cancels a task that is still queued, including while the queue is stopped. The task never runs and its `TaskHandle<T>` is canceled immediately
+- Adding to a disposed queue throws `ObjectDisposedException` from every add method (previously `InvalidOperationException` or `ChannelClosedException`). An `AddTaskAsync` waiting for space when the queue is disposed also throws `ObjectDisposedException`
+- `QueuedCount`, `CurrentQueueDepth`, and the `taskhandler.queue.depth` gauge now include the task waiting for a concurrency slot (it was previously counted nowhere, so `WaitForCompletionAsync` could return early)
+- A task that reaches the running set always has its function invoked (with a canceled token if cancellation arrived first), so its own cancellation handling runs
+
+**Fixes:**
+- Adding a task right after `Start()` on a queue restarted with retained tasks threw `InvalidOperationException` until they were consumed
+- `Dispose()` could leave a task waiting for a slot stuck forever: `SemaphoreSlim.Dispose()` discards pending async waiters, so the runner's canceled wait never resumed. The semaphore is no longer disposed (it holds no unmanaged resources)
+- `StopAsync(waitForCompletion: true)` never waited (the runner reference was cleared first). It now waits for the runner to exit and for canceled tasks to finish
+- `IsRunning` was almost always `false` because it tested `TaskStatus.Running` on an async runner. It now reflects the started state
+- `DisposeAsync()` threw `ObjectDisposedException` when called on an already-disposed queue; it is now idempotent
+- `Stop()` canceled the runner after canceling running tasks, leaving a window where a new task could start un-canceled; the order is reversed and guarded by a lock
+
+**Documentation:**
+- README and XML docs describe the stop, restart, and dispose semantics, terminal events, and exceptions for every add method
+- Clarified that `Priority` is informational and does not change execution order (tasks start FIFO), and corrected the `TaskDetails.Priority` default description
+- The README graceful-shutdown example uses `await using`, so `DisposeAsync` actually runs
+- TELEMETRY.md: `dropped` now means disposed before start (from `queued` or `slot_wait`), `queue.depth` includes the slot-waiting task, and `queue_closed` means disposed
+
+**Testing:**
+- 17 new cases for retention across stop/restart, adding while stopped and after restart, ordering, bounded waits while stopped, dispose drops and handle completion, `Stop(guid)` on queued tasks, single terminal events, `OnProcessingStopped` counts, `StopAsync` waiting, `IsRunning`, and telemetry for dropped and canceled-before-start tasks; 153 cases total
+
+## v2.2.0
 
 **Observability:**
 - `TaskQueue` and `TaskRunWithTimeout` emit metrics and traces through the BCL `Meter` and `ActivitySource` named `TaskHandler`, with no exporter or SDK dependency and near-zero cost when unobserved. All names are public constants on `TaskHandlerTelemetryNames`; see `TELEMETRY.md`

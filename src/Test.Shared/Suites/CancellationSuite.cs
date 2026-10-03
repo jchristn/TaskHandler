@@ -63,6 +63,36 @@ namespace Test.Shared
                     }
                 }),
 
+                TaskHandlerSuites.Case(Id, "StopByGuidQueuedTask", "Stop(guid) on a task waiting behind a full queue cancels it without running it", async ct =>
+                {
+                    bool ran = false;
+                    using (TaskQueue queue = new TaskQueue(maxConcurrentTasks: 1))
+                    {
+                        queue.Start();
+                        await queue.EnqueueAsync("blocker", async token => await Task.Delay(300, token));
+                        Check.True(await Check.WaitUntilAsync(() => queue.RunningCount == 1), "blocker running");
+                        Guid guid = await queue.EnqueueAsync("victim", async token => { ran = true; await Task.Delay(5, token); });
+
+                        queue.Stop(guid);
+                        Check.True(await Check.WaitUntilAsync(() => queue.GetStatistics().TotalCanceled == 1 && queue.QueuedCount == 0), "victim canceled");
+                        Check.True(await Check.WaitUntilAsync(() => queue.GetStatistics().TotalCompleted == 1), "blocker still completes");
+                        Check.False(ran, "victim never runs");
+                    }
+                }),
+
+                TaskHandlerSuites.Case(Id, "StopByGuidWhileStopped", "Stop(guid) works on a queued task while the queue is stopped", async ct =>
+                {
+                    bool ran = false;
+                    using (TaskQueue queue = new TaskQueue())
+                    {
+                        Guid guid = await queue.EnqueueAsync("victim", async token => { ran = true; await Task.Delay(5, token); });
+                        queue.Stop(guid);
+                        queue.Start();
+                        Check.True(await Check.WaitUntilAsync(() => queue.GetStatistics().TotalCanceled == 1), "counted as canceled");
+                        Check.False(ran, "victim never runs");
+                    }
+                }),
+
                 TaskHandlerSuites.Case(Id, "StopUnknownGuidGraceful", "Stop(unknown guid) does not throw", async ct =>
                 {
                     using (TaskQueue queue = new TaskQueue())

@@ -37,13 +37,13 @@ dotnet build -c Release
 
 ## Architecture
 
-**Current Version:** v2.2.0
+**Current Version:** v2.3.0
 
 The architecture has evolved significantly from v1.0.x:
 - **v1.0.x**: Polling-based with 100ms iteration delay
 - **v2.0.0**: Event-driven with Channels and Semaphores (10-100x performance improvement), includes statistics tracking and progress reporting
 
-This documentation describes the v2.x architecture (v2.2.0 adds built-in metrics and traces; see TELEMETRY.md).
+This documentation describes the v2.x architecture (v2.2.0 adds built-in metrics and traces; see TELEMETRY.md; v2.3.0 fixes stop/restart/dispose semantics).
 
 ### Core Components
 
@@ -121,7 +121,22 @@ This documentation describes the v2.x architecture (v2.2.0 adds built-in metrics
 3. **Starting**: `TaskRunner` reads from Channel and acquires semaphore, then starts task execution
 4. **Monitoring**: Task completion triggers a continuation that handles cleanup
 5. **Completion**: Continuation removes task from `_RunningTasks`, fires appropriate event (Finished/Faulted/Canceled), and releases semaphore slot
-6. **Events**: Fires events at each lifecycle stage (Added, Started, Finished, Faulted, Canceled)
+6. **Events**: Fires events at each lifecycle stage (Added, Started, Finished, Faulted, Canceled). Each task raises
+   exactly one terminal event (Finished/Faulted/Canceled); cancellation requests do not raise one themselves
+
+### Stop / Restart / Dispose Semantics (v2.3.0)
+
+- The Channel lives for the queue's lifetime. `Stop()` never completes it; only `Dispose()` does (`TryComplete` then
+  drain). Tasks can be added while stopped. `SingleReader` is false because `Dispose()` drains concurrently
+- `Stop()` cancels the runner token first, then running tasks. A task the runner had dequeued but not started is parked
+  in `_HeldTask` (`HoldOrDrop`) and resumed first by the next runner, which awaits the previous runner before reading
+- `_PendingTasks` tracks accepted-but-unstarted tasks so `Stop(guid)` can cancel them; `QueuedCount` includes them
+- The check-and-add into `_RunningTasks` happens under `_StateLock`, which `Stop()`/`Dispose()` also take, so a task is
+  either in the running set before cancellation or never started. Once in the running set its function always runs
+  (the token is not passed to `Task.Run`)
+- `Dispose()` drops every unstarted task via `CompleteDropped` (telemetry `dropped`, handle canceled, `OnTaskCanceled`,
+  `TotalCanceled`). Never dispose `_concurrencySemaphore`: `SemaphoreSlim.Dispose()` discards async waiters and hangs
+  the runner
 
 ### Critical Implementation Details
 
@@ -133,7 +148,7 @@ This documentation describes the v2.x architecture (v2.2.0 adds built-in metrics
 
 - **Backpressure**: Bounded channels (when `MaxQueueSize > 0`) provide backpressure by blocking or waiting when queue is full.
 
-- **Cancellation**: Calling `Stop()` with no arguments cancels ALL running tasks. Calling `Stop(Guid)` cancels a specific task. The task runner itself can be stopped via `_TaskRunnerTokenSource`.
+- **Cancellation**: Calling `Stop()` with no arguments cancels ALL running tasks and retains unstarted ones. Calling `Stop(Guid)` cancels a specific running or queued task. The task runner itself can be stopped via `_TaskRunnerTokenSource`.
 
 - **Statistics Tracking**: Tracks enqueue/completion counts, timing metrics, and calculates rolling averages for performance monitoring.
 
@@ -153,7 +168,7 @@ Testing is built on **[Touchstone](https://github.com/jchristn/touchstone)**, a 
 descriptor framework. Test cases are defined once and executed through multiple hosts.
 
 **Test.Shared** (src/Test.Shared) is the single source of truth for the test corpus. It exposes
-`TaskHandlerSuites.All`, a set of `TestSuiteDescriptor` objects containing 136 exhaustive positive and
+`TaskHandlerSuites.All`, a set of `TestSuiteDescriptor` objects containing 153 exhaustive positive and
 negative test cases organized into suites:
 - Construction & configuration (constructors, options, Create factory, validation)
 - Property validation

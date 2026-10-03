@@ -53,8 +53,10 @@
         </member>
         <member name="P:TaskHandler.TaskDetails.Priority">
             <summary>
-            Task priority. Lower number = higher priority.
-            Default: 0 (Normal priority).
+            Task priority. Lower number = higher priority (see <see cref="T:TaskHandler.TaskPriority"/>).
+            Informational: recorded for callers and telemetry, but it does not change execution order; tasks start
+            in the order they were added.
+            Default: 0.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskDetails.EnqueuedAt">
@@ -225,14 +227,16 @@
             <param name="details">Task details.</param>
             <param name="concurrencyLimit">Configured concurrency limit.</param>
         </member>
-        <member name="M:TaskHandler.TaskHandlerTelemetry.TaskDropped(System.String,TaskHandler.TaskDetails,System.Exception)">
+        <member name="M:TaskHandler.TaskHandlerTelemetry.TaskDropped(System.String,TaskHandler.TaskDetails,System.String)">
             <summary>
-            Called by the task runner when a dequeued task can never run because the runner stopped (or failed)
-            while the task waited for a concurrency slot.
+            Called when an accepted task can never run because the queue was disposed, whether it was still in the
+            queue or already read by the runner and waiting for a concurrency slot. Emits the interrupted stage and the
+            terminal dropped outcome, and closes (or, for a task never read from the queue, creates) the job span.
+            Leaves Activity.Current unchanged.
             </summary>
             <param name="queueName">Queue name.</param>
             <param name="details">Task details.</param>
-            <param name="ex">Exception that interrupted the slot wait.</param>
+            <param name="errorType">Bounded error type.</param>
         </member>
         <member name="M:TaskHandler.TaskHandlerTelemetry.TaskCompleted(System.String,TaskHandler.TaskDetails,System.Threading.Tasks.Task,System.DateTime)">
             <summary>
@@ -555,7 +559,8 @@
         </member>
         <member name="F:TaskHandler.TaskHandlerTelemetryNames.OutcomeDropped">
             <summary>
-            Outcome value: the task was removed from the queue but never ran because the queue stopped first.
+            Outcome value: the task was accepted but never ran because the queue was disposed first. Tasks still queued
+            when the queue is stopped are retained for the next start and are not dropped.
             </summary>
         </member>
         <member name="F:TaskHandler.TaskHandlerTelemetryNames.OutcomeRejected">
@@ -615,7 +620,7 @@
         </member>
         <member name="F:TaskHandler.TaskHandlerTelemetryNames.ErrorQueueClosed">
             <summary>
-            Error type value: the queue was closed (stopped) during the enqueue attempt.
+            Error type value: the queue was disposed, so an enqueue attempt was rejected or a queued task was dropped.
             </summary>
         </member>
         <member name="T:TaskHandler.TaskInfo">
@@ -774,7 +779,7 @@
         </member>
         <member name="P:TaskHandler.TaskQueue.QueuedCount">
             <summary>
-            Number of tasks waiting in the queue.
+            Number of tasks accepted but not yet started, including tasks held while the queue is stopped.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.OnTaskAdded">
@@ -791,19 +796,22 @@
         </member>
         <member name="P:TaskHandler.TaskQueue.OnTaskCanceled">
             <summary>
-            Event to fire when a task is canceled.
+            Event to fire when a task ends canceled: its function observed cancellation, it was canceled with
+            <see cref="M:TaskHandler.TaskQueue.Stop(System.Guid)"/> before it started, or it was dropped because the queue was disposed before it
+            started. Each task raises exactly one of <see cref="P:TaskHandler.TaskQueue.OnTaskFinished"/>, <see cref="P:TaskHandler.TaskQueue.OnTaskFaulted"/>, or
+            OnTaskCanceled. A task whose function catches cancellation and returns normally raises OnTaskFinished.
             Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.OnTaskFaulted">
             <summary>
-            Event to fire when a task is faulted.
+            Event to fire when a task's function throws (including a timeout from EnqueueAsync).
             Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.OnTaskFinished">
             <summary>
-            Event to fire when a task is finished.
+            Event to fire when a task's function completes successfully.
             Default: null.
             </summary>
         </member>
@@ -815,13 +823,14 @@
         </member>
         <member name="P:TaskHandler.TaskQueue.OnProcessingStopped">
             <summary>
-            Event to fire when processing stops.
+            Event to fire when processing stops: once per <see cref="M:TaskHandler.TaskQueue.Stop"/>, on <see cref="M:TaskHandler.TaskQueue.Dispose"/> of a started
+            queue, or if the background runner fails.
             Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.IsRunning">
             <summary>
-            Boolean to indicate whether or not the task runner is running.
+            True while the queue is started (not stopped or disposed) and its background runner is active.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.IsProcessing">
@@ -856,18 +865,27 @@
         </member>
         <member name="M:TaskHandler.TaskQueue.Dispose">
             <summary>
-            Dispose.
+            Dispose. Cancels running tasks and drops tasks that have not started: each dropped task completes as
+            canceled (its <see cref="T:TaskHandler.TaskHandle`1"/> is canceled, <see cref="P:TaskHandler.TaskQueue.OnTaskCanceled"/> fires, and it is
+            counted in <see cref="P:TaskHandler.TaskQueueStatistics.TotalCanceled"/>). Fires <see cref="P:TaskHandler.TaskQueue.OnProcessingStopped"/> if
+            the queue was started. Does not wait for running tasks; use <see cref="M:TaskHandler.TaskQueue.DisposeAsync"/> to wait.
+            Safe to call more than once.
             </summary>
         </member>
         <member name="M:TaskHandler.TaskQueue.DisposeAsync">
             <summary>
-            Dispose asynchronously.
+            Dispose asynchronously. Stops the queue, waits for running tasks to finish responding to cancellation,
+            then disposes (dropping tasks that have not started, as described for <see cref="M:TaskHandler.TaskQueue.Dispose"/>).
+            Safe to call more than once.
             </summary>
             <returns>ValueTask.</returns>
         </member>
         <member name="M:TaskHandler.TaskQueue.AddTask(System.Guid,System.String,System.Collections.Generic.Dictionary{System.String,System.Object},System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task})">
             <summary>
             Add a task.
+            Tasks can be added whether or not the queue is started; tasks added while it is stopped run after the
+            next <see cref="M:TaskHandler.TaskQueue.Start"/>. Does not wait: on a bounded queue that is full the task is rejected (use
+            <see cref="M:TaskHandler.TaskQueue.AddTaskAsync(System.Guid,System.String,System.Collections.Generic.Dictionary{System.String,System.Object},System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task},System.Threading.CancellationToken)"/> to wait for space instead).
             Emits the "taskhandler enqueue" span and the taskhandler.task.enqueued / taskhandler.task.rejected metrics.
             </summary>
             <param name="guid">Guid.</param>
@@ -876,13 +894,15 @@
             <param name="func">Action.</param>
             <returns>TaskDetails.</returns>
             <exception cref="T:System.ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
-            <exception cref="T:System.InvalidOperationException">Thrown when the task cannot be written to the queue (for example, a bounded queue is full).</exception>
+            <exception cref="T:System.InvalidOperationException">Thrown when a bounded queue is full.</exception>
+            <exception cref="T:System.ObjectDisposedException">Thrown when the queue has been disposed.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.AddTaskAsync(System.Guid,System.String,System.Collections.Generic.Dictionary{System.String,System.Object},System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task},System.Threading.CancellationToken)">
             <summary>
             Add a task asynchronously.
-            On a bounded queue that is full, waits for space (backpressure); the wait is measured by
-            taskhandler.queue.enqueue.duration.
+            Tasks can be added whether or not the queue is started; tasks added while it is stopped run after the
+            next <see cref="M:TaskHandler.TaskQueue.Start"/>. On a bounded queue that is full, waits for space (backpressure), including
+            while the queue is stopped; the wait is measured by taskhandler.queue.enqueue.duration.
             </summary>
             <param name="guid">Guid.</param>
             <param name="name">Name of the task.</param>
@@ -892,10 +912,13 @@
             <returns>TaskDetails.</returns>
             <exception cref="T:System.ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
             <exception cref="T:System.OperationCanceledException">Thrown when cancellation is requested while waiting for queue space.</exception>
+            <exception cref="T:System.ObjectDisposedException">Thrown when the queue has been (or is, while waiting for space) disposed.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.EnqueueAsync(System.String,System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task},System.Int32,System.Nullable{System.TimeSpan},System.Threading.CancellationToken)">
             <summary>
             Enqueue a task with priority and timeout support.
+            Like <see cref="M:TaskHandler.TaskQueue.AddTaskAsync(System.Guid,System.String,System.Collections.Generic.Dictionary{System.String,System.Object},System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task},System.Threading.CancellationToken)"/>, can be called whether or not the queue is started, and waits for space
+            on a full bounded queue. The timeout covers execution only, not time spent queued.
             </summary>
             <param name="name">Name of the task.</param>
             <param name="func">Task function.</param>
@@ -903,6 +926,9 @@
             <param name="timeout">Optional timeout for task execution.</param>
             <param name="cancellationToken">Cancellation token.</param>
             <returns>Task GUID.</returns>
+            <exception cref="T:System.ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
+            <exception cref="T:System.OperationCanceledException">Thrown when cancellationToken is canceled while waiting for space in a bounded queue.</exception>
+            <exception cref="T:System.ObjectDisposedException">Thrown when the queue has been (or is, while waiting for space) disposed.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.EnqueueAsync``1(System.String,System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task{``0}},System.Int32,System.Nullable{System.TimeSpan},System.Threading.CancellationToken)">
             <summary>
@@ -915,6 +941,9 @@
             <param name="timeout">Optional timeout for task execution.</param>
             <param name="cancellationToken">Cancellation token.</param>
             <returns>TaskHandle that can be awaited for the result.</returns>
+            <exception cref="T:System.ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
+            <exception cref="T:System.OperationCanceledException">Thrown when cancellationToken is canceled while waiting for space in a bounded queue.</exception>
+            <exception cref="T:System.ObjectDisposedException">Thrown when the queue has been (or is, while waiting for space) disposed.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.EnqueueAsync``1(System.String,System.Func{System.Threading.CancellationToken,System.IProgress{TaskHandler.TaskProgress},System.Threading.Tasks.Task{``0}},System.IProgress{TaskHandler.TaskProgress},System.Int32,System.Nullable{System.TimeSpan},System.Threading.CancellationToken)">
             <summary>
@@ -928,6 +957,9 @@
             <param name="timeout">Optional timeout for task execution.</param>
             <param name="cancellationToken">Cancellation token.</param>
             <returns>TaskHandle that can be awaited for the result.</returns>
+            <exception cref="T:System.ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
+            <exception cref="T:System.OperationCanceledException">Thrown when cancellationToken is canceled while waiting for space in a bounded queue.</exception>
+            <exception cref="T:System.ObjectDisposedException">Thrown when the queue has been (or is, while waiting for space) disposed.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.EnqueueAsync(System.String,System.Func{System.Threading.CancellationToken,System.IProgress{TaskHandler.TaskProgress},System.Threading.Tasks.Task},System.IProgress{TaskHandler.TaskProgress},System.Int32,System.Nullable{System.TimeSpan},System.Threading.CancellationToken)">
             <summary>
@@ -940,6 +972,9 @@
             <param name="timeout">Optional timeout for task execution.</param>
             <param name="cancellationToken">Cancellation token.</param>
             <returns>Task GUID.</returns>
+            <exception cref="T:System.ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
+            <exception cref="T:System.OperationCanceledException">Thrown when cancellationToken is canceled while waiting for space in a bounded queue.</exception>
+            <exception cref="T:System.ObjectDisposedException">Thrown when the queue has been (or is, while waiting for space) disposed.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.GetRunningTasksInfo">
             <summary>
@@ -955,8 +990,12 @@
         </member>
         <member name="M:TaskHandler.TaskQueue.Start">
             <summary>
-            Start running tasks.
+            Start running tasks. Tasks already queued (including tasks retained by a previous <see cref="M:TaskHandler.TaskQueue.Stop"/>)
+            start in the order they were added, subject to <see cref="P:TaskHandler.TaskQueue.MaxConcurrentTasks"/>.
+            A stopped queue can be started again.
             </summary>
+            <exception cref="T:System.ObjectDisposedException">Thrown when the queue has been disposed.</exception>
+            <exception cref="T:System.InvalidOperationException">Thrown when the queue is already started.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.StartAsync(System.Threading.CancellationToken)">
             <summary>
@@ -964,30 +1003,46 @@
             </summary>
             <param name="cancellationToken">Cancellation token.</param>
             <returns>Task.</returns>
+            <exception cref="T:System.ObjectDisposedException">Thrown when the queue has been disposed.</exception>
+            <exception cref="T:System.InvalidOperationException">Thrown when the queue is already started.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.Stop">
             <summary>
-            Stop running tasks.
+            Stop running tasks. Cancels every running task (through the token passed to its function) and stops
+            starting new ones. Tasks that have not started are retained, and tasks can still be added; all of them
+            run after the next <see cref="M:TaskHandler.TaskQueue.Start"/>. Fires <see cref="P:TaskHandler.TaskQueue.OnProcessingStopped"/>.
+            Does nothing if the queue is not started.
             </summary>
+            <exception cref="T:System.ObjectDisposedException">Thrown when the queue has been disposed.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.StopAsync(System.Boolean,System.Threading.CancellationToken)">
             <summary>
-            Stop running tasks asynchronously.
+            Stop running tasks asynchronously. See <see cref="M:TaskHandler.TaskQueue.Stop"/>.
             </summary>
-            <param name="waitForCompletion">Whether to wait for running tasks to complete.</param>
-            <param name="cancellationToken">Cancellation token.</param>
+            <param name="waitForCompletion">When true, waits until the background runner has exited and every
+            canceled task has finished. A task function that ignores its cancellation token delays this until it
+            returns, so pass a cancellationToken to bound the wait. Default: false.</param>
+            <param name="cancellationToken">Cancellation token for the wait.</param>
             <returns>Task.</returns>
+            <exception cref="T:System.ObjectDisposedException">Thrown when the queue has been disposed.</exception>
+            <exception cref="T:System.OperationCanceledException">Thrown when cancellationToken is canceled while waiting.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.WaitForCompletionAsync(System.Threading.CancellationToken)">
             <summary>
-            Wait for all tasks to complete.
+            Wait until no tasks are queued or running. Tasks retained while the queue is stopped count as queued,
+            so on a stopped queue that still holds tasks this does not return until the queue is started and they
+            finish, or cancellationToken is canceled.
             </summary>
             <param name="cancellationToken">Cancellation token.</param>
             <returns>Task.</returns>
+            <exception cref="T:System.OperationCanceledException">Thrown when cancellationToken is canceled while waiting.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.Stop(System.Guid)">
             <summary>
-            Stop a running task by GUID.
+            Cancel a task by GUID, whether it is running or still waiting in the queue (including while the queue is
+            stopped). A running task is canceled through the token passed to its function. A waiting task never
+            runs: its <see cref="T:TaskHandler.TaskHandle`1"/> (if any) is canceled immediately, and it completes as canceled
+            (firing <see cref="P:TaskHandler.TaskQueue.OnTaskCanceled"/>) when the queue next reaches it. Unknown or finished GUIDs are ignored.
             </summary>
             <param name="guid">GUID.</param>
         </member>
@@ -1094,13 +1149,15 @@
         </member>
         <member name="P:TaskHandler.TaskQueueStatistics.TotalCanceled">
             <summary>
-            Total number of tasks that were canceled.
+            Total number of tasks that were canceled, including tasks dropped because the queue was disposed before
+            they started.
             Default: 0.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueueStatistics.CurrentQueueDepth">
             <summary>
-            Current number of tasks waiting in the queue.
+            Current number of tasks accepted but not yet started, including tasks waiting for a concurrency slot and
+            tasks retained while the queue is stopped.
             Default: 0.
             </summary>
         </member>

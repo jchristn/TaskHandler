@@ -102,7 +102,7 @@ namespace TaskHandler
         }
 
         /// <summary>
-        /// Number of tasks waiting in the queue.
+        /// Number of tasks accepted but not yet started, including tasks held while the queue is stopped.
         /// </summary>
         public int QueuedCount
         {
@@ -125,19 +125,22 @@ namespace TaskHandler
         public EventHandler<TaskDetails> OnTaskStarted { get; set; } = null;
 
         /// <summary>
-        /// Event to fire when a task is canceled.
+        /// Event to fire when a task ends canceled: its function observed cancellation, it was canceled with
+        /// <see cref="Stop(Guid)"/> before it started, or it was dropped because the queue was disposed before it
+        /// started. Each task raises exactly one of <see cref="OnTaskFinished"/>, <see cref="OnTaskFaulted"/>, or
+        /// OnTaskCanceled. A task whose function catches cancellation and returns normally raises OnTaskFinished.
         /// Default: null.
         /// </summary>
         public EventHandler<TaskDetails> OnTaskCanceled { get; set; } = null;
 
         /// <summary>
-        /// Event to fire when a task is faulted.
+        /// Event to fire when a task's function throws (including a timeout from EnqueueAsync).
         /// Default: null.
         /// </summary>
         public EventHandler<TaskDetails> OnTaskFaulted { get; set; } = null;
 
         /// <summary>
-        /// Event to fire when a task is finished.
+        /// Event to fire when a task's function completes successfully.
         /// Default: null.
         /// </summary>
         public EventHandler<TaskDetails> OnTaskFinished { get; set; } = null;
@@ -149,19 +152,21 @@ namespace TaskHandler
         public EventHandler OnProcessingStarted { get; set; } = null;
 
         /// <summary>
-        /// Event to fire when processing stops.
+        /// Event to fire when processing stops: once per <see cref="Stop()"/>, on <see cref="Dispose"/> of a started
+        /// queue, or if the background runner fails.
         /// Default: null.
         /// </summary>
         public EventHandler OnProcessingStopped { get; set; } = null;
 
         /// <summary>
-        /// Boolean to indicate whether or not the task runner is running.
+        /// True while the queue is started (not stopped or disposed) and its background runner is active.
         /// </summary>
         public bool IsRunning
         {
             get
             {
-                return (_TaskRunner != null && _TaskRunner.Status == TaskStatus.Running);
+                Task runner = _TaskRunner;
+                return _IsStarted && !_IsDisposed && runner != null && !runner.IsCompleted;
             }
         }
 
@@ -201,6 +206,8 @@ namespace TaskHandler
         private Channel<TaskDetails> _queueChannel;
         private SemaphoreSlim _concurrencySemaphore;
         private int _queuedCount = 0;
+        private ConcurrentDictionary<Guid, TaskDetails> _PendingTasks = new ConcurrentDictionary<Guid, TaskDetails>();
+        private TaskDetails _HeldTask = null;
 
         private CancellationTokenSource _TaskRunnerTokenSource = new CancellationTokenSource();
         private CancellationToken _TaskRunnerToken;
@@ -242,11 +249,14 @@ namespace TaskHandler
             MaxConcurrentTasks = maxConcurrentTasks;
             MaxQueueSize = maxQueueSize;
 
+            // The channel lives as long as the queue: Stop() leaves it open so queued tasks are retained and new tasks
+            // can still be added, and only Dispose() completes it. SingleReader is false because Dispose() drains it
+            // while a stopping runner may still be reading.
             if (maxQueueSize > 0)
             {
                 _queueChannel = Channel.CreateBounded<TaskDetails>(new BoundedChannelOptions(maxQueueSize)
                 {
-                    SingleReader = true,
+                    SingleReader = false,
                     SingleWriter = false,
                     FullMode = BoundedChannelFullMode.Wait
                 });
@@ -255,7 +265,7 @@ namespace TaskHandler
             {
                 _queueChannel = Channel.CreateUnbounded<TaskDetails>(new UnboundedChannelOptions
                 {
-                    SingleReader = true,
+                    SingleReader = false,
                     SingleWriter = false
                 });
             }
@@ -299,17 +309,34 @@ namespace TaskHandler
         #region Public-Methods
 
         /// <summary>
-        /// Dispose.
+        /// Dispose. Cancels running tasks and drops tasks that have not started: each dropped task completes as
+        /// canceled (its <see cref="TaskHandle{T}"/> is canceled, <see cref="OnTaskCanceled"/> fires, and it is
+        /// counted in <see cref="TaskQueueStatistics.TotalCanceled"/>). Fires <see cref="OnProcessingStopped"/> if
+        /// the queue was started. Does not wait for running tasks; use <see cref="DisposeAsync"/> to wait.
+        /// Safe to call more than once.
         /// </summary>
         public void Dispose()
         {
+            List<TaskDetails> dropped = new List<TaskDetails>();
+            bool wasStarted;
+
             lock (_StateLock)
             {
                 if (_IsDisposed) return;
                 _IsDisposed = true;
+                wasStarted = _IsStarted;
+                _IsStarted = false;
 
                 Logger?.Invoke(_Header + "disposing");
                 TaskHandlerTelemetry.Lifecycle(_Name, TaskHandlerTelemetryNames.LifecycleDispose);
+
+                // Reject further writes, then stop the runner before canceling tasks so it cannot start another.
+                _queueChannel.Writer.TryComplete();
+
+                if (!_TaskRunnerTokenSource.IsCancellationRequested)
+                {
+                    _TaskRunnerTokenSource.Cancel();
+                }
 
                 foreach (KeyValuePair<Guid, TaskDetails> task in _RunningTasks)
                 {
@@ -322,29 +349,66 @@ namespace TaskHandler
                     task.Value.TokenSource.Cancel();
                 }
 
-                if (!_TaskRunnerTokenSource.IsCancellationRequested)
+                if (_HeldTask != null)
                 {
-                    _TaskRunnerTokenSource.Cancel();
+                    dropped.Add(_HeldTask);
+                    _HeldTask = null;
                 }
 
+                while (_queueChannel.Reader.TryRead(out TaskDetails queued))
+                {
+                    dropped.Add(queued);
+                }
+
+                foreach (TaskDetails task in dropped)
+                {
+                    Interlocked.Decrement(ref _queuedCount);
+                    RemovePending(task);
+                }
+
+                // The semaphore is intentionally not disposed: SemaphoreSlim.Dispose() discards pending async waiters,
+                // so a runner whose canceled WaitAsync resumes afterwards would wait forever, and running tasks still
+                // release their slots as they finish. It holds no unmanaged resources because AvailableWaitHandle is
+                // never used.
                 _TaskRunnerTokenSource?.Dispose();
-                _concurrencySemaphore?.Dispose();
                 TaskHandlerTelemetry.UnregisterQueue(_TelemetryId);
             }
+
+            foreach (TaskDetails task in dropped)
+            {
+                CompleteDropped(task);
+            }
+
+            if (wasStarted) SafeInvokeEvent(OnProcessingStopped, nameof(OnProcessingStopped), EventArgs.Empty);
         }
 
         /// <summary>
-        /// Dispose asynchronously.
+        /// Dispose asynchronously. Stops the queue, waits for running tasks to finish responding to cancellation,
+        /// then disposes (dropping tasks that have not started, as described for <see cref="Dispose"/>).
+        /// Safe to call more than once.
         /// </summary>
         /// <returns>ValueTask.</returns>
         public async ValueTask DisposeAsync()
         {
-            await StopAsync(waitForCompletion: true).ConfigureAwait(false);
+            if (_IsDisposed) return;
+
+            try
+            {
+                await StopAsync(waitForCompletion: true).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Disposed concurrently
+            }
+
             Dispose();
         }
 
         /// <summary>
         /// Add a task.
+        /// Tasks can be added whether or not the queue is started; tasks added while it is stopped run after the
+        /// next <see cref="Start"/>. Does not wait: on a bounded queue that is full the task is rejected (use
+        /// <see cref="AddTaskAsync"/> to wait for space instead).
         /// Emits the "taskhandler enqueue" span and the taskhandler.task.enqueued / taskhandler.task.rejected metrics.
         /// </summary>
         /// <param name="guid">Guid.</param>
@@ -353,13 +417,12 @@ namespace TaskHandler
         /// <param name="func">Action.</param>
         /// <returns>TaskDetails.</returns>
         /// <exception cref="ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
-        /// <exception cref="InvalidOperationException">Thrown when the task cannot be written to the queue (for example, a bounded queue is full).</exception>
+        /// <exception cref="InvalidOperationException">Thrown when a bounded queue is full.</exception>
+        /// <exception cref="ObjectDisposedException">Thrown when the queue has been disposed.</exception>
         public TaskDetails AddTask(Guid guid, string name, Dictionary<string, object> metadata, Func<CancellationToken, Task> func)
         {
             if (String.IsNullOrEmpty(name)) throw new ArgumentNullException(nameof(name));
             if (func == null) throw new ArgumentNullException(nameof(func));
-
-            EnsureChannelOpen();
 
             TaskDetails details = new TaskDetails
             {
@@ -373,14 +436,25 @@ namespace TaskHandler
             Activity enqueueActivity = TaskHandlerTelemetry.StartEnqueue(_Name, details, _queuedCount);
             TaskHandlerTelemetry.CaptureParentContext(details, enqueueActivity);
 
+            // Count the task before it becomes visible to the runner so QueuedCount never goes negative.
+            Interlocked.Increment(ref _queuedCount);
+            _PendingTasks[details.Guid] = details;
+
             if (!_queueChannel.Writer.TryWrite(details))
             {
-                string errorType = _MaxQueueSize > 0 ? TaskHandlerTelemetryNames.ErrorQueueFull : TaskHandlerTelemetryNames.ErrorQueueClosed;
-                TaskHandlerTelemetry.EnqueueRejected(_Name, enqueueActivity, enqueueStarted, errorType, null);
-                throw new InvalidOperationException("Failed to enqueue task.");
+                Interlocked.Decrement(ref _queuedCount);
+                RemovePending(details);
+
+                if (_IsDisposed)
+                {
+                    TaskHandlerTelemetry.EnqueueRejected(_Name, enqueueActivity, enqueueStarted, TaskHandlerTelemetryNames.ErrorQueueClosed, null);
+                    throw new ObjectDisposedException(nameof(TaskQueue));
+                }
+
+                TaskHandlerTelemetry.EnqueueRejected(_Name, enqueueActivity, enqueueStarted, TaskHandlerTelemetryNames.ErrorQueueFull, null);
+                throw new InvalidOperationException("Failed to enqueue task '" + name + "': the queue is full (MaxQueueSize " + _MaxQueueSize + ").");
             }
 
-            Interlocked.Increment(ref _queuedCount);
             Interlocked.Increment(ref _TotalEnqueued);
             TaskHandlerTelemetry.EnqueueSucceeded(_Name, enqueueActivity, enqueueStarted);
             SafeInvokeEvent(OnTaskAdded, nameof(OnTaskAdded), details);
@@ -389,8 +463,9 @@ namespace TaskHandler
 
         /// <summary>
         /// Add a task asynchronously.
-        /// On a bounded queue that is full, waits for space (backpressure); the wait is measured by
-        /// taskhandler.queue.enqueue.duration.
+        /// Tasks can be added whether or not the queue is started; tasks added while it is stopped run after the
+        /// next <see cref="Start"/>. On a bounded queue that is full, waits for space (backpressure), including
+        /// while the queue is stopped; the wait is measured by taskhandler.queue.enqueue.duration.
         /// </summary>
         /// <param name="guid">Guid.</param>
         /// <param name="name">Name of the task.</param>
@@ -400,6 +475,7 @@ namespace TaskHandler
         /// <returns>TaskDetails.</returns>
         /// <exception cref="ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
         /// <exception cref="OperationCanceledException">Thrown when cancellation is requested while waiting for queue space.</exception>
+        /// <exception cref="ObjectDisposedException">Thrown when the queue has been (or is, while waiting for space) disposed.</exception>
         public async Task<TaskDetails> AddTaskAsync(
             Guid guid,
             string name,
@@ -412,6 +488,8 @@ namespace TaskHandler
 
         /// <summary>
         /// Enqueue a task with priority and timeout support.
+        /// Like <see cref="AddTaskAsync"/>, can be called whether or not the queue is started, and waits for space
+        /// on a full bounded queue. The timeout covers execution only, not time spent queued.
         /// </summary>
         /// <param name="name">Name of the task.</param>
         /// <param name="func">Task function.</param>
@@ -419,6 +497,9 @@ namespace TaskHandler
         /// <param name="timeout">Optional timeout for task execution.</param>
         /// <param name="cancellationToken">Cancellation token.</param>
         /// <returns>Task GUID.</returns>
+        /// <exception cref="ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when cancellationToken is canceled while waiting for space in a bounded queue.</exception>
+        /// <exception cref="ObjectDisposedException">Thrown when the queue has been (or is, while waiting for space) disposed.</exception>
         public async Task<Guid> EnqueueAsync(
             string name,
             Func<CancellationToken, Task> func,
@@ -464,6 +545,9 @@ namespace TaskHandler
         /// <param name="timeout">Optional timeout for task execution.</param>
         /// <param name="cancellationToken">Cancellation token.</param>
         /// <returns>TaskHandle that can be awaited for the result.</returns>
+        /// <exception cref="ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when cancellationToken is canceled while waiting for space in a bounded queue.</exception>
+        /// <exception cref="ObjectDisposedException">Thrown when the queue has been (or is, while waiting for space) disposed.</exception>
         public async Task<TaskHandle<T>> EnqueueAsync<T>(
             string name,
             Func<CancellationToken, Task<T>> func,
@@ -532,6 +616,9 @@ namespace TaskHandler
         /// <param name="timeout">Optional timeout for task execution.</param>
         /// <param name="cancellationToken">Cancellation token.</param>
         /// <returns>TaskHandle that can be awaited for the result.</returns>
+        /// <exception cref="ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when cancellationToken is canceled while waiting for space in a bounded queue.</exception>
+        /// <exception cref="ObjectDisposedException">Thrown when the queue has been (or is, while waiting for space) disposed.</exception>
         public async Task<TaskHandle<T>> EnqueueAsync<T>(
             string name,
             Func<CancellationToken, IProgress<TaskProgress>, Task<T>> func,
@@ -600,6 +687,9 @@ namespace TaskHandler
         /// <param name="timeout">Optional timeout for task execution.</param>
         /// <param name="cancellationToken">Cancellation token.</param>
         /// <returns>Task GUID.</returns>
+        /// <exception cref="ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when cancellationToken is canceled while waiting for space in a bounded queue.</exception>
+        /// <exception cref="ObjectDisposedException">Thrown when the queue has been (or is, while waiting for space) disposed.</exception>
         public async Task<Guid> EnqueueAsync(
             string name,
             Func<CancellationToken, IProgress<TaskProgress>, Task> func,
@@ -699,8 +789,12 @@ namespace TaskHandler
         }
 
         /// <summary>
-        /// Start running tasks.
+        /// Start running tasks. Tasks already queued (including tasks retained by a previous <see cref="Stop()"/>)
+        /// start in the order they were added, subject to <see cref="MaxConcurrentTasks"/>.
+        /// A stopped queue can be started again.
         /// </summary>
+        /// <exception cref="ObjectDisposedException">Thrown when the queue has been disposed.</exception>
+        /// <exception cref="InvalidOperationException">Thrown when the queue is already started.</exception>
         public void Start()
         {
             lock (_StateLock)
@@ -719,13 +813,15 @@ namespace TaskHandler
                     _TaskRunnerToken = _TaskRunnerTokenSource.Token;
                 }
 
-                // Recreate channel if it was completed
-                EnsureChannelOpen();
-
-                _TaskRunner = Task.Run(() => TaskRunner(_TaskRunnerToken), _TaskRunnerToken);
+                // The new runner waits for the previous one to exit, so the two never read the queue concurrently
+                // and a task the previous runner was holding is resumed first.
+                Task previousRunner = _TaskRunner;
+                CancellationToken token = _TaskRunnerToken;
+                _TaskRunner = Task.Run(() => TaskRunner(previousRunner, token), token);
                 TaskHandlerTelemetry.Lifecycle(_Name, TaskHandlerTelemetryNames.LifecycleStart);
-                SafeInvokeEvent(OnProcessingStarted, nameof(OnProcessingStarted), EventArgs.Empty);
             }
+
+            SafeInvokeEvent(OnProcessingStarted, nameof(OnProcessingStarted), EventArgs.Empty);
         }
 
         /// <summary>
@@ -733,6 +829,8 @@ namespace TaskHandler
         /// </summary>
         /// <param name="cancellationToken">Cancellation token.</param>
         /// <returns>Task.</returns>
+        /// <exception cref="ObjectDisposedException">Thrown when the queue has been disposed.</exception>
+        /// <exception cref="InvalidOperationException">Thrown when the queue is already started.</exception>
         public Task StartAsync(CancellationToken cancellationToken = default)
         {
             Start();
@@ -740,8 +838,12 @@ namespace TaskHandler
         }
 
         /// <summary>
-        /// Stop running tasks.
+        /// Stop running tasks. Cancels every running task (through the token passed to its function) and stops
+        /// starting new ones. Tasks that have not started are retained, and tasks can still be added; all of them
+        /// run after the next <see cref="Start"/>. Fires <see cref="OnProcessingStopped"/>.
+        /// Does nothing if the queue is not started.
         /// </summary>
+        /// <exception cref="ObjectDisposedException">Thrown when the queue has been disposed.</exception>
         public void Stop()
         {
             lock (_StateLock)
@@ -753,63 +855,69 @@ namespace TaskHandler
                 _IsStarted = false;
                 TaskHandlerTelemetry.Lifecycle(_Name, TaskHandlerTelemetryNames.LifecycleStop);
 
-                // Complete the channel (no more tasks accepted)
-                _queueChannel.Writer.Complete();
-
-                // Cancel all running tasks
-                if (_RunningTasks.Count > 0)
-                {
-                    foreach (KeyValuePair<Guid, TaskDetails> task in _RunningTasks)
-                    {
-                        Logger?.Invoke(_Header + "evaluating task " + task.Key.ToString());
-                        if (!task.Value.TokenSource.IsCancellationRequested)
-                        {
-                            Logger?.Invoke(_Header + "canceling task " + task.Key.ToString());
-                            TaskHandlerTelemetry.CancellationRequested(_Name, task.Value, TaskHandlerTelemetryNames.CancelReasonStopAll);
-                            task.Value.TokenSource.Cancel();
-                            SafeInvokeEvent(OnTaskCanceled, nameof(OnTaskCanceled), task.Value);
-                        }
-                    }
-                }
-
+                // Stop the runner first so it cannot start another task after the running set is canceled.
                 if (!_TaskRunnerTokenSource.IsCancellationRequested)
                 {
                     _TaskRunnerTokenSource.Cancel();
                 }
 
-                SafeInvokeEvent(OnProcessingStopped, nameof(OnProcessingStopped), EventArgs.Empty);
-                _TaskRunner = null;
+                foreach (KeyValuePair<Guid, TaskDetails> task in _RunningTasks)
+                {
+                    if (!task.Value.TokenSource.IsCancellationRequested)
+                    {
+                        Logger?.Invoke(_Header + "canceling task " + task.Key.ToString());
+                        TaskHandlerTelemetry.CancellationRequested(_Name, task.Value, TaskHandlerTelemetryNames.CancelReasonStopAll);
+                        task.Value.TokenSource.Cancel();
+                    }
+                }
             }
+
+            SafeInvokeEvent(OnProcessingStopped, nameof(OnProcessingStopped), EventArgs.Empty);
         }
 
         /// <summary>
-        /// Stop running tasks asynchronously.
+        /// Stop running tasks asynchronously. See <see cref="Stop()"/>.
         /// </summary>
-        /// <param name="waitForCompletion">Whether to wait for running tasks to complete.</param>
-        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <param name="waitForCompletion">When true, waits until the background runner has exited and every
+        /// canceled task has finished. A task function that ignores its cancellation token delays this until it
+        /// returns, so pass a cancellationToken to bound the wait. Default: false.</param>
+        /// <param name="cancellationToken">Cancellation token for the wait.</param>
         /// <returns>Task.</returns>
+        /// <exception cref="ObjectDisposedException">Thrown when the queue has been disposed.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when cancellationToken is canceled while waiting.</exception>
         public async Task StopAsync(bool waitForCompletion = false, CancellationToken cancellationToken = default)
         {
             Stop();
 
-            if (waitForCompletion && _TaskRunner != null)
+            if (!waitForCompletion) return;
+
+            Task runner = _TaskRunner;
+            if (runner != null)
             {
                 try
                 {
-                    await _TaskRunner.ConfigureAwait(false);
+                    await runner.ConfigureAwait(false);
                 }
-                catch (OperationCanceledException)
+                catch (Exception)
                 {
-                    // Expected
+                    // The runner records its own failures
                 }
+            }
+
+            while (_RunningTasks.Count > 0)
+            {
+                await Task.Delay(10, cancellationToken).ConfigureAwait(false);
             }
         }
 
         /// <summary>
-        /// Wait for all tasks to complete.
+        /// Wait until no tasks are queued or running. Tasks retained while the queue is stopped count as queued,
+        /// so on a stopped queue that still holds tasks this does not return until the queue is started and they
+        /// finish, or cancellationToken is canceled.
         /// </summary>
         /// <param name="cancellationToken">Cancellation token.</param>
         /// <returns>Task.</returns>
+        /// <exception cref="OperationCanceledException">Thrown when cancellationToken is canceled while waiting.</exception>
         public async Task WaitForCompletionAsync(CancellationToken cancellationToken = default)
         {
             // Note: use QueuedCount (tracked via Interlocked) rather than the channel reader's
@@ -822,22 +930,34 @@ namespace TaskHandler
         }
 
         /// <summary>
-        /// Stop a running task by GUID.
+        /// Cancel a task by GUID, whether it is running or still waiting in the queue (including while the queue is
+        /// stopped). A running task is canceled through the token passed to its function. A waiting task never
+        /// runs: its <see cref="TaskHandle{T}"/> (if any) is canceled immediately, and it completes as canceled
+        /// (firing <see cref="OnTaskCanceled"/>) when the queue next reaches it. Unknown or finished GUIDs are ignored.
         /// </summary>
         /// <param name="guid">GUID.</param>
         public void Stop(Guid guid)
         {
             Logger?.Invoke(_Header + "attempting to stop task " + guid.ToString());
 
-            if (_TaskRunner == null) return;
-
             TaskDetails task = null;
-            if (_RunningTasks.TryGetValue(guid, out task))
+            if (_RunningTasks.TryGetValue(guid, out task) || _PendingTasks.TryGetValue(guid, out task))
             {
+                if (task.TokenSource.IsCancellationRequested) return;
+
                 Logger?.Invoke(_Header + "canceling task " + guid.ToString());
                 TaskHandlerTelemetry.CancellationRequested(_Name, task, TaskHandlerTelemetryNames.CancelReasonStopTask);
-                task.TokenSource.Cancel();
-                SafeInvokeEvent(OnTaskCanceled, nameof(OnTaskCanceled), task);
+
+                try
+                {
+                    task.TokenSource.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                    return;
+                }
+
+                if (_PendingTasks.ContainsKey(guid)) InvokeAbandoned(task);
             }
             else
             {
@@ -848,35 +968,6 @@ namespace TaskHandler
         #endregion
 
         #region Private-Methods
-
-        private void EnsureChannelOpen()
-        {
-            // If channel is completed (after Stop()), recreate it
-            if (!_queueChannel.Reader.Completion.IsCompleted) return;
-
-            lock (_StateLock)
-            {
-                if (!_queueChannel.Reader.Completion.IsCompleted) return;
-
-                if (_MaxQueueSize > 0)
-                {
-                    _queueChannel = Channel.CreateBounded<TaskDetails>(new BoundedChannelOptions(_MaxQueueSize)
-                    {
-                        SingleReader = true,
-                        SingleWriter = false,
-                        FullMode = BoundedChannelFullMode.Wait
-                    });
-                }
-                else
-                {
-                    _queueChannel = Channel.CreateUnbounded<TaskDetails>(new UnboundedChannelOptions
-                    {
-                        SingleReader = true,
-                        SingleWriter = false
-                    });
-                }
-            }
-        }
 
         private async Task<TaskDetails> AddTaskInternalAsync(
             Guid guid,
@@ -889,8 +980,6 @@ namespace TaskHandler
         {
             if (String.IsNullOrEmpty(name)) throw new ArgumentNullException(nameof(name));
             if (func == null) throw new ArgumentNullException(nameof(func));
-
-            EnsureChannelOpen();
 
             TaskDetails details = new TaskDetails
             {
@@ -906,17 +995,23 @@ namespace TaskHandler
             Activity enqueueActivity = TaskHandlerTelemetry.StartEnqueue(_Name, details, _queuedCount);
             TaskHandlerTelemetry.CaptureParentContext(details, enqueueActivity);
 
+            // Count the task before it becomes visible to the runner so QueuedCount never goes negative.
+            Interlocked.Increment(ref _queuedCount);
+            _PendingTasks[details.Guid] = details;
+
             try
             {
                 await _queueChannel.Writer.WriteAsync(details, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
+                Interlocked.Decrement(ref _queuedCount);
+                RemovePending(details);
                 TaskHandlerTelemetry.EnqueueRejected(_Name, enqueueActivity, enqueueStarted, TaskHandlerTelemetry.EnqueueErrorType(ex), ex);
+                if (ex is ChannelClosedException) throw new ObjectDisposedException(nameof(TaskQueue));
                 throw;
             }
 
-            Interlocked.Increment(ref _queuedCount);
             Interlocked.Increment(ref _TotalEnqueued);
             TaskHandlerTelemetry.EnqueueSucceeded(_Name, enqueueActivity, enqueueStarted);
             SafeInvokeEvent(OnTaskAdded, nameof(OnTaskAdded), details);
@@ -967,7 +1062,7 @@ namespace TaskHandler
             }
         }
 
-        private async Task TaskRunner(CancellationToken token)
+        private async Task TaskRunner(Task previousRunner, CancellationToken token)
         {
             // Detach from whatever span was current when Start() was called, so each task's spans are parented
             // only to the context captured when that task was enqueued.
@@ -975,18 +1070,36 @@ namespace TaskHandler
 
             try
             {
+                if (previousRunner != null)
+                {
+                    try
+                    {
+                        await previousRunner.ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                        // The previous runner recorded its own failure
+                    }
+                }
+
+                TaskDetails held = TakeHeldTask();
+                if (held != null)
+                {
+                    await DispatchAsync(held, token, true).ConfigureAwait(false);
+                }
+
 #if NETSTANDARD2_0
                 while (await _queueChannel.Reader.WaitToReadAsync(token).ConfigureAwait(false))
                 {
-                    while (_queueChannel.Reader.TryRead(out TaskDetails taskDetails))
+                    while (!token.IsCancellationRequested && _queueChannel.Reader.TryRead(out TaskDetails taskDetails))
                     {
-                        await DispatchAsync(taskDetails, token).ConfigureAwait(false);
+                        await DispatchAsync(taskDetails, token, false).ConfigureAwait(false);
                     }
                 }
 #else
                 await foreach (TaskDetails taskDetails in _queueChannel.Reader.ReadAllAsync(token).ConfigureAwait(false))
                 {
-                    await DispatchAsync(taskDetails, token).ConfigureAwait(false);
+                    await DispatchAsync(taskDetails, token, false).ConfigureAwait(false);
                 }
 #endif
             }
@@ -994,56 +1107,119 @@ namespace TaskHandler
             {
                 Logger?.Invoke(_Header + "task runner canceled");
             }
+            catch (ChannelClosedException)
+            {
+                Logger?.Invoke(_Header + "task runner exiting, queue disposed");
+            }
             catch (Exception e)
             {
                 Logger?.Invoke(_Header + "task runner exception: " + Environment.NewLine + e.ToString());
-                if (!_IsDisposed) TaskHandlerTelemetry.RunnerError(_Name, e);
-            }
-            finally
-            {
-                SafeInvokeEvent(OnProcessingStopped, nameof(OnProcessingStopped), EventArgs.Empty);
+
+                bool stopped = false;
+                lock (_StateLock)
+                {
+                    if (!_IsDisposed && _IsStarted && token == _TaskRunnerToken)
+                    {
+                        _IsStarted = false;
+                        stopped = true;
+                    }
+                }
+
+                if (stopped)
+                {
+                    TaskHandlerTelemetry.RunnerError(_Name, e);
+                    SafeInvokeEvent(OnProcessingStopped, nameof(OnProcessingStopped), EventArgs.Empty);
+                }
             }
 
             Logger?.Invoke(_Header + "task runner exiting");
         }
 
-        private async Task DispatchAsync(TaskDetails taskDetails, CancellationToken token)
+        private async Task DispatchAsync(TaskDetails taskDetails, CancellationToken token, bool resumed)
         {
-            Interlocked.Decrement(ref _queuedCount);
-            taskDetails.DequeuedAt = DateTime.UtcNow;
-            TaskHandlerTelemetry.TaskDequeued(_Name, taskDetails);
+            if (!resumed)
+            {
+                taskDetails.DequeuedAt = DateTime.UtcNow;
+                TaskHandlerTelemetry.TaskDequeued(_Name, taskDetails);
+            }
 
-            // Wait for available slot
+            // A task canceled with Stop(guid) while it waited never runs and does not need a slot.
+            if (taskDetails.Token.IsCancellationRequested)
+            {
+                CompleteCanceledBeforeStart(taskDetails);
+                return;
+            }
+
+            // Wait for available slot. If the queue stops first, hold the task for the next Start(); if it is
+            // disposed, drop it.
             try
             {
                 await _concurrencySemaphore.WaitAsync(token).ConfigureAwait(false);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                TaskHandlerTelemetry.TaskDropped(_Name, taskDetails, ex);
-                InvokeAbandoned(taskDetails);
+                HoldOrDrop(taskDetails);
                 throw;
             }
 
-            // Track timing
-            taskDetails.StartedAt = DateTime.UtcNow;
-            _LastTaskStarted = taskDetails.StartedAt;
-            TimeSpan waitTime = taskDetails.StartedAt.Value - taskDetails.EnqueuedAt;
-            _WaitTimes.Enqueue(waitTime);
-            while (_WaitTimes.Count > _MaxTimingSamples)
+            bool interrupted = false;
+            bool canceledBeforeStart = false;
+            lock (_StateLock)
             {
-                _WaitTimes.TryDequeue(out TimeSpan discarded);
+                // Stop() and Dispose() take this lock, so a task is either added to the running set before they
+                // cancel it, or never started.
+                if (token.IsCancellationRequested)
+                {
+                    interrupted = true;
+                    _concurrencySemaphore.Release();
+                }
+                else if (taskDetails.Token.IsCancellationRequested)
+                {
+                    canceledBeforeStart = true;
+                    _concurrencySemaphore.Release();
+                }
+                else
+                {
+                    Interlocked.Decrement(ref _queuedCount);
+                    RemovePending(taskDetails);
+
+                    // Track timing
+                    taskDetails.StartedAt = DateTime.UtcNow;
+                    _LastTaskStarted = taskDetails.StartedAt;
+                    TimeSpan waitTime = taskDetails.StartedAt.Value - taskDetails.EnqueuedAt;
+                    _WaitTimes.Enqueue(waitTime);
+                    while (_WaitTimes.Count > _MaxTimingSamples)
+                    {
+                        _WaitTimes.TryDequeue(out TimeSpan discarded);
+                    }
+
+                    // Open the execute span before the task becomes visible in RunningTasks, so a Stop(guid) issued as
+                    // soon as the task appears is recorded on it. The span (when subscribed) stays current while
+                    // Task.Run captures the execution context, so spans and logs created by the user function nest
+                    // under it.
+                    TaskHandlerTelemetry.TaskStarting(_Name, taskDetails, _MaxConcurrentTasks);
+
+                    // Add to running tasks
+                    _RunningTasks.TryAdd(taskDetails.Guid, taskDetails);
+                }
             }
 
-            // Open the execute span before the task becomes visible in RunningTasks, so a Stop(guid) issued as soon
-            // as the task appears is recorded on it. The span (when subscribed) stays current while Task.Run
-            // captures the execution context, so spans and logs created by the user function nest under it.
-            TaskHandlerTelemetry.TaskStarting(_Name, taskDetails, _MaxConcurrentTasks);
+            if (interrupted)
+            {
+                HoldOrDrop(taskDetails);
+                throw new OperationCanceledException(token);
+            }
 
-            // Add to running tasks
-            _RunningTasks.TryAdd(taskDetails.Guid, taskDetails);
+            if (canceledBeforeStart)
+            {
+                CompleteCanceledBeforeStart(taskDetails);
+                return;
+            }
 
-            taskDetails.Task = Task.Run(() => taskDetails.Function(taskDetails.Token), taskDetails.Token);
+            // The token is deliberately not passed to Task.Run: once a task is in the running set its function is
+            // always invoked, so a cancellation that arrives now is observed by the function (and its own cleanup
+            // runs) instead of the task silently never starting.
+            taskDetails.Task = Task.Run(() => taskDetails.Function(taskDetails.Token));
             Activity.Current = null;
 
             Logger?.Invoke(_Header + "started task " + taskDetails.Guid.ToString() + " (" + _RunningTasks.Count + " running tasks)");
@@ -1051,17 +1227,72 @@ namespace TaskHandler
 
             // Set up continuation to handle completion
             Task continuation = taskDetails.Task.ContinueWith(
-                completedTask => HandleTaskCompletion(taskDetails, completedTask),
+                completedTask => HandleTaskCompletion(taskDetails, completedTask, true),
                 TaskScheduler.Default
             );
         }
 
-        private void HandleTaskCompletion(TaskDetails taskDetails, Task completedTask)
+        private void CompleteCanceledBeforeStart(TaskDetails taskDetails)
+        {
+            Interlocked.Decrement(ref _queuedCount);
+            RemovePending(taskDetails);
+            TaskHandlerTelemetry.TaskStarting(_Name, taskDetails, _MaxConcurrentTasks);
+            Activity.Current = null;
+            taskDetails.Task = Task.FromCanceled(taskDetails.Token);
+            HandleTaskCompletion(taskDetails, taskDetails.Task, false);
+        }
+
+        private void HoldOrDrop(TaskDetails taskDetails)
+        {
+            bool drop;
+            lock (_StateLock)
+            {
+                drop = _IsDisposed;
+                if (drop)
+                {
+                    Interlocked.Decrement(ref _queuedCount);
+                    RemovePending(taskDetails);
+                }
+                else
+                {
+                    _HeldTask = taskDetails;
+                }
+            }
+
+            if (drop) CompleteDropped(taskDetails);
+        }
+
+        private TaskDetails TakeHeldTask()
+        {
+            lock (_StateLock)
+            {
+                TaskDetails held = _HeldTask;
+                _HeldTask = null;
+                return held;
+            }
+        }
+
+        private void CompleteDropped(TaskDetails taskDetails)
+        {
+            Logger?.Invoke(_Header + "task " + taskDetails.Guid.ToString() + " dropped, queue disposed before it started");
+            TaskHandlerTelemetry.TaskDropped(_Name, taskDetails, TaskHandlerTelemetryNames.ErrorQueueClosed);
+            Interlocked.Increment(ref _TotalCanceled);
+            InvokeAbandoned(taskDetails);
+            SafeInvokeEvent(OnTaskCanceled, nameof(OnTaskCanceled), taskDetails);
+        }
+
+        private void RemovePending(TaskDetails taskDetails)
+        {
+            // Remove only this instance, in case another task was added with the same GUID.
+            ((ICollection<KeyValuePair<Guid, TaskDetails>>)_PendingTasks).Remove(new KeyValuePair<Guid, TaskDetails>(taskDetails.Guid, taskDetails));
+        }
+
+        private void HandleTaskCompletion(TaskDetails taskDetails, Task completedTask, bool releaseSlot)
         {
             try
             {
-                // Remove from running tasks
-                _RunningTasks.TryRemove(taskDetails.Guid, out TaskDetails removed);
+                // Remove from running tasks (only this instance, in case another task was added with the same GUID)
+                ((ICollection<KeyValuePair<Guid, TaskDetails>>)_RunningTasks).Remove(new KeyValuePair<Guid, TaskDetails>(taskDetails.Guid, taskDetails));
 
                 // Track completion time
                 DateTime completedAt = DateTime.UtcNow;
@@ -1106,7 +1337,7 @@ namespace TaskHandler
             finally
             {
                 // Release semaphore slot for next task
-                _concurrencySemaphore.Release();
+                if (releaseSlot) _concurrencySemaphore.Release();
             }
         }
 

@@ -313,20 +313,10 @@ namespace TaskHandler
                 DateTime dequeuedAt = details.DequeuedAt ?? DateTime.UtcNow;
                 RecordStage(queueName, TaskHandlerTelemetryNames.StageQueued, TaskHandlerTelemetryNames.OutcomeSuccess, details.EnqueuedAt, dequeuedAt);
 
-                Activity job = Source.StartActivity(
-                    TaskHandlerTelemetryNames.SpanTask,
-                    ActivityKind.Consumer,
-                    details.ParentContext,
-                    null,
-                    null,
-                    new DateTimeOffset(details.EnqueuedAt));
+                Activity job = StartJobActivity(queueName, details);
 
                 if (job != null)
                 {
-                    job.SetTag(TaskHandlerTelemetryNames.AttrQueueName, queueName);
-                    job.SetTag(TaskHandlerTelemetryNames.AttrTaskId, details.Guid.ToString());
-                    job.SetTag(TaskHandlerTelemetryNames.AttrTaskName, details.Name);
-                    job.SetTag(TaskHandlerTelemetryNames.AttrTaskPriority, details.Priority);
                     details.JobActivity = job;
 
                     Activity queued = Source.StartActivity(
@@ -411,20 +401,30 @@ namespace TaskHandler
         }
 
         /// <summary>
-        /// Called by the task runner when a dequeued task can never run because the runner stopped (or failed)
-        /// while the task waited for a concurrency slot.
+        /// Called when an accepted task can never run because the queue was disposed, whether it was still in the
+        /// queue or already read by the runner and waiting for a concurrency slot. Emits the interrupted stage and the
+        /// terminal dropped outcome, and closes (or, for a task never read from the queue, creates) the job span.
+        /// Leaves Activity.Current unchanged.
         /// </summary>
         /// <param name="queueName">Queue name.</param>
         /// <param name="details">Task details.</param>
-        /// <param name="ex">Exception that interrupted the slot wait.</param>
-        internal static void TaskDropped(string queueName, TaskDetails details, Exception ex)
+        /// <param name="errorType">Bounded error type.</param>
+        internal static void TaskDropped(string queueName, TaskDetails details, string errorType)
         {
+            Activity previous = Activity.Current;
+
             try
             {
                 DateTime now = DateTime.UtcNow;
-                DateTime dequeuedAt = details.DequeuedAt ?? now;
-                string errorType = ErrorType(ex);
-                RecordStage(queueName, TaskHandlerTelemetryNames.StageSlotWait, TaskHandlerTelemetryNames.OutcomeDropped, dequeuedAt, now);
+                if (details.DequeuedAt.HasValue)
+                {
+                    RecordStage(queueName, TaskHandlerTelemetryNames.StageSlotWait, TaskHandlerTelemetryNames.OutcomeDropped, details.DequeuedAt.Value, now);
+                }
+                else
+                {
+                    RecordStage(queueName, TaskHandlerTelemetryNames.StageQueued, TaskHandlerTelemetryNames.OutcomeDropped, details.EnqueuedAt, now);
+                }
+
                 RecordTerminal(queueName, TaskHandlerTelemetryNames.OutcomeDropped, errorType, details.EnqueuedAt, now);
 
                 Activity slotWait = details.SlotWaitActivity;
@@ -435,18 +435,22 @@ namespace TaskHandler
                     details.SlotWaitActivity = null;
                 }
 
-                Activity job = details.JobActivity;
+                Activity job = details.JobActivity ?? StartJobActivity(queueName, details);
                 if (job != null)
                 {
                     job.SetTag(TaskHandlerTelemetryNames.AttrOutcome, TaskHandlerTelemetryNames.OutcomeDropped);
                     job.SetTag(TaskHandlerTelemetryNames.AttrErrorType, errorType);
-                    job.SetStatus(ActivityStatusCode.Error, "Task dropped: the queue stopped before a concurrency slot became available.");
+                    job.SetStatus(ActivityStatusCode.Error, "Task dropped: the queue was disposed before the task ran.");
                     job.Stop();
                     details.JobActivity = null;
                 }
             }
             catch (Exception)
             {
+            }
+            finally
+            {
+                Activity.Current = previous;
             }
         }
 
@@ -644,6 +648,27 @@ namespace TaskHandler
         #endregion
 
         #region Private-Methods
+
+        private static Activity StartJobActivity(string queueName, TaskDetails details)
+        {
+            Activity job = Source.StartActivity(
+                TaskHandlerTelemetryNames.SpanTask,
+                ActivityKind.Consumer,
+                details.ParentContext,
+                null,
+                null,
+                new DateTimeOffset(details.EnqueuedAt));
+
+            if (job != null)
+            {
+                job.SetTag(TaskHandlerTelemetryNames.AttrQueueName, queueName);
+                job.SetTag(TaskHandlerTelemetryNames.AttrTaskId, details.Guid.ToString());
+                job.SetTag(TaskHandlerTelemetryNames.AttrTaskName, details.Name);
+                job.SetTag(TaskHandlerTelemetryNames.AttrTaskPriority, details.Priority);
+            }
+
+            return job;
+        }
 
         private static Histogram<double> CreateDurationHistogram(string name, string description)
         {

@@ -91,7 +91,7 @@ Monitor every stage of task execution with built-in events:
 - `OnTaskStarted`: When a task begins execution
 - `OnTaskFinished`: When a task completes successfully
 - `OnTaskFaulted`: When a task throws an exception
-- `OnTaskCanceled`: When a task is canceled
+- `OnTaskCanceled`: When a task is canceled (each task raises exactly one of Finished, Faulted, or Canceled)
 - Built-in OpenTelemetry-compatible **metrics and traces** (queue depth, concurrency in use, per-stage latency, outcomes, and errors by type) for Prometheus, Tempo, and Grafana. See [Observability](#observability-metrics-and-traces).
 
 ### 🛡️ **Robust Error Handling**
@@ -330,10 +330,10 @@ using (TaskQueue queue = new TaskQueue())
     queue.Start();
     await Task.Delay(2000);
 
-    // Cancel the specific task
+    // Cancel the specific task (works for running and still-queued tasks)
     queue.Stop(taskId);
 
-    // Or cancel all running tasks
+    // Or cancel all running tasks; tasks not yet started are kept for the next Start()
     queue.Stop();
 }
 ```
@@ -472,25 +472,25 @@ Creates a new task queue with the specified maximum concurrent task limit and op
 | `MaxConcurrentTasks` | `int` | Maximum number of tasks that can run concurrently. Minimum: 1, Default: 32 |
 | `MaxQueueSize` | `int` | Maximum queue size. -1 for unbounded (default). Prevents memory exhaustion when tasks arrive faster than they can be processed |
 | `RunningCount` | `int` | Number of currently running tasks (read-only) |
-| `QueuedCount` | `int` | Number of tasks waiting in the queue (read-only) |
+| `QueuedCount` | `int` | Number of tasks accepted but not yet started, including tasks waiting for a concurrency slot and tasks held while the queue is stopped (read-only) |
 | `RunningTasks` | `ConcurrentDictionary<Guid, TaskDetails>` | Dictionary of currently running tasks (read-only) |
-| `IsRunning` | `bool` | Whether the task runner is currently active (read-only) |
+| `IsRunning` | `bool` | True while the queue is started (not stopped or disposed) and its background runner is active (read-only) |
 | `Logger` | `Action<string>` | Optional callback for log messages |
 
 #### Methods
 
 | Method | Description |
 |--------|-------------|
-| `AddTask(Guid guid, string name, Dictionary<string, object> metadata, Func<CancellationToken, Task> func)` | Adds a task to the queue synchronously. Returns `TaskDetails`. May throw if bounded queue is full |
-| `AddTaskAsync(Guid guid, string name, Dictionary<string, object> metadata, Func<CancellationToken, Task> func, CancellationToken cancellationToken)` | Adds a task to the queue asynchronously. Waits if bounded queue is full. Returns `Task<TaskDetails>` |
-| `Start()` | Starts processing tasks from the queue |
-| `StartAsync(CancellationToken cancellationToken)` | Starts processing tasks asynchronously. Returns `Task` |
-| `Stop()` | Stops processing and cancels all running tasks |
-| `Stop(Guid guid)` | Cancels a specific task by its GUID |
-| `StopAsync(bool waitForCompletion, CancellationToken cancellationToken)` | Stops processing asynchronously. Optionally waits for running tasks to complete |
-| `WaitForCompletionAsync(CancellationToken cancellationToken)` | Waits until the queue is empty and all tasks have finished |
-| `Dispose()` | Stops the queue and releases resources |
-| `DisposeAsync()` | Stops the queue asynchronously and releases resources. Returns `ValueTask` |
+| `AddTask(Guid guid, string name, Dictionary<string, object> metadata, Func<CancellationToken, Task> func)` | Adds a task without waiting. Works whether or not the queue is started. Returns `TaskDetails`. Throws `InvalidOperationException` if a bounded queue is full and `ObjectDisposedException` after dispose |
+| `AddTaskAsync(Guid guid, string name, Dictionary<string, object> metadata, Func<CancellationToken, Task> func, CancellationToken cancellationToken)` | Adds a task. Works whether or not the queue is started. Waits for space if a bounded queue is full (even while stopped). Returns `Task<TaskDetails>`. Throws `ObjectDisposedException` after (or during) dispose |
+| `Start()` | Starts processing. Tasks already queued, including tasks retained by a previous `Stop()`, start in the order they were added. A stopped queue can be started again |
+| `StartAsync(CancellationToken cancellationToken)` | Same as `Start()`. Returns `Task` |
+| `Stop()` | Cancels all running tasks and stops starting new ones. Tasks that have not started are kept and new tasks can still be added; they run after the next `Start()` |
+| `Stop(Guid guid)` | Cancels one task, whether running or still queued (also while stopped). A queued task never runs and its `TaskHandle<T>` is canceled immediately |
+| `StopAsync(bool waitForCompletion, CancellationToken cancellationToken)` | Same as `Stop()`. With `waitForCompletion: true`, also waits until the runner has exited and every canceled task has finished |
+| `WaitForCompletionAsync(CancellationToken cancellationToken)` | Waits until no tasks are queued or running. On a stopped queue that still holds tasks it waits until the queue is started and they finish (or the token is canceled) |
+| `Dispose()` | Cancels running tasks and drops tasks that have not started (each completes as canceled: handle canceled, `OnTaskCanceled` fired, counted in `TotalCanceled`). Does not wait. Safe to call more than once |
+| `DisposeAsync()` | Stops, waits for running tasks to finish responding to cancellation, then disposes as above. Returns `ValueTask`. Safe to call more than once |
 
 #### Events
 
@@ -498,11 +498,13 @@ Creates a new task queue with the specified maximum concurrent task limit and op
 |-------|------|-------------|
 | `OnTaskAdded` | `EventHandler<TaskDetails>` | Fired when a task is added to the queue |
 | `OnTaskStarted` | `EventHandler<TaskDetails>` | Fired when a task begins execution |
-| `OnTaskFinished` | `EventHandler<TaskDetails>` | Fired when a task completes successfully |
-| `OnTaskFaulted` | `EventHandler<TaskDetails>` | Fired when a task throws an exception |
-| `OnTaskCanceled` | `EventHandler<TaskDetails>` | Fired when a task is canceled |
-| `OnProcessingStarted` | `EventHandler` | Fired when the queue starts processing |
-| `OnProcessingStopped` | `EventHandler` | Fired when the queue stops processing |
+| `OnTaskFinished` | `EventHandler<TaskDetails>` | Fired when a task's function completes successfully (including one that catches cancellation and returns normally) |
+| `OnTaskFaulted` | `EventHandler<TaskDetails>` | Fired when a task's function throws (including an `EnqueueAsync` timeout) |
+| `OnTaskCanceled` | `EventHandler<TaskDetails>` | Fired when a task ends canceled: its function observed cancellation, it was canceled with `Stop(guid)` before starting, or it was dropped by `Dispose()` before starting |
+| `OnProcessingStarted` | `EventHandler` | Fired on each `Start()` |
+| `OnProcessingStopped` | `EventHandler` | Fired once per `Stop()`, on `Dispose()` of a started queue, or if the background runner fails |
+
+Every task raises exactly one of `OnTaskFinished`, `OnTaskFaulted`, or `OnTaskCanceled`. Cancellation requests (from `Stop()` or `Stop(guid)`) do not raise an event themselves; the task's terminal event follows when it ends.
 
 ### TaskDetails Class
 
@@ -1226,7 +1228,12 @@ queue.OnTaskFinished += (sender, task) =>
 
 ### Multiple Start/Stop Cycles
 
-TaskHandler supports starting and stopping the queue multiple times:
+TaskHandler supports starting and stopping the queue multiple times. `Stop()` pauses the queue rather than emptying it:
+
+- Running tasks are canceled through their `CancellationToken`.
+- Tasks that have not started stay queued, including one that was waiting for a concurrency slot. They run after the next `Start()`, in the order they were added.
+- Tasks can be added while the queue is stopped; they run after the next `Start()`.
+- Only `Dispose()` discards unstarted tasks. Each one completes as canceled (`TaskHandle<T>` canceled, `OnTaskCanceled` fired, counted in `TotalCanceled`), so nothing awaiting a handle hangs.
 
 ```csharp
 TaskQueue queue = new TaskQueue(10);
@@ -1253,15 +1260,17 @@ using System.Threading.Tasks;
 using TaskHandler;
 
 // Recommended approach: Use async methods
-using (TaskQueue queue = new TaskQueue())
+await using (TaskQueue queue = new TaskQueue())
 {
+    queue.Start();
+
     // Add and process tasks...
 
     // Wait for all tasks to complete
     await queue.WaitForCompletionAsync();
     await queue.StopAsync(waitForCompletion: true);
 }
-// DisposeAsync called automatically by using statement
+// DisposeAsync is called by the await using statement
 ```
 
 ## Framework Support
@@ -1285,7 +1294,7 @@ Dependencies: `System.Threading.Channels` and `System.Diagnostics.DiagnosticSour
 
 ## Testing
 
-Tests are defined once in `src/Test.Shared` using [Touchstone](https://github.com/jchristn/touchstone) and executed by three runners. The corpus contains 136 positive and negative cases covering construction and validation, enqueue and execution, concurrency control, cancellation, lifecycle, events, `TaskHandle<T>`, statistics, progress, priority, `TaskInfo`, `TaskRunWithTimeout`, and telemetry (every metric and span family, including failure, timeout, cancellation, rejection, drop, and no-listener paths).
+Tests are defined once in `src/Test.Shared` using [Touchstone](https://github.com/jchristn/touchstone) and executed by three runners. The corpus contains 153 positive and negative cases covering construction and validation, enqueue and execution, concurrency control, cancellation, lifecycle (including stop/restart retention, adding while stopped, and dispose drops), events, `TaskHandle<T>`, statistics, progress, priority, `TaskInfo`, `TaskRunWithTimeout`, and telemetry (every metric and span family, including failure, timeout, cancellation, rejection, drop, and no-listener paths).
 
 ```bash
 cd src/Test.Automated && dotnet run          # Touchstone CLI runner
@@ -1434,7 +1443,9 @@ catch (TimeoutException ex)
 
 ### Task Priority
 
-Assign priorities to tasks (lower number = higher priority):
+Assign priorities to tasks (lower number = higher priority).
+
+> **Note:** priority is recorded on the task (`TaskDetails.Priority`, `TaskInfo.Priority`, and the `taskhandler.task.priority` span attribute) for your own use, but it does not change execution order. Tasks start in the order they were added. If you need urgent work to bypass a backlog, use a separate `TaskQueue` for it.
 
 ```csharp
 using TaskHandler;
@@ -1604,8 +1615,8 @@ await queue.DisposeAsync();
 | `TotalEnqueued` | `long` | Total number of tasks enqueued since queue creation |
 | `TotalCompleted` | `long` | Total number of tasks completed successfully |
 | `TotalFailed` | `long` | Total number of tasks that failed (faulted) |
-| `TotalCanceled` | `long` | Total number of tasks that were canceled |
-| `CurrentQueueDepth` | `int` | Current number of tasks waiting in the queue |
+| `TotalCanceled` | `long` | Total number of tasks that were canceled, including tasks dropped by `Dispose()` before they started |
+| `CurrentQueueDepth` | `int` | Current number of tasks accepted but not yet started (including tasks waiting for a slot or held while stopped) |
 | `CurrentRunningCount` | `int` | Current number of tasks actively running |
 | `AverageExecutionTime` | `TimeSpan` | Average execution time across completed tasks |
 | `AverageWaitTime` | `TimeSpan` | Average time tasks spent waiting in queue before execution |

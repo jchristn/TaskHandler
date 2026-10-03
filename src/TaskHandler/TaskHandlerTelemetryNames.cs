@@ -274,7 +274,8 @@ namespace TaskHandler
         public const string OutcomeCanceled = "canceled";
 
         /// <summary>
-        /// Outcome value: the task was removed from the queue but never ran because the queue stopped first.
+        /// Outcome value: the task was accepted but never ran because the queue was disposed first. Tasks still queued
+        /// when the queue is stopped are retained for the next start and are not dropped.
         /// </summary>
         public const string OutcomeDropped = "dropped";
 
@@ -334,7 +335,7 @@ namespace TaskHandler
         public const string ErrorQueueFull = "queue_full";
 
         /// <summary>
-        /// Error type value: the queue was closed (stopped) during the enqueue attempt.
+        /// Error type value: the queue was disposed, so an enqueue attempt was rejected or a queued task was dropped.
         /// </summary>
         public const string ErrorQueueClosed = "queue_closed";
 

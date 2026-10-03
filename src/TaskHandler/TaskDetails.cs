@@ -100,8 +100,10 @@
         public CancellationToken Token { get; set; }
 
         /// <summary>
-        /// Task priority. Lower number = higher priority.
-        /// Default: 0 (Normal priority).
+        /// Task priority. Lower number = higher priority (see <see cref="TaskPriority"/>).
+        /// Informational: recorded for callers and telemetry, but it does not change execution order; tasks start
+        /// in the order they were added.
+        /// Default: 0.
         /// </summary>
         public int Priority { get; set; } = 0;
 
