@@ -68,6 +68,39 @@
             Null if task has not started yet.
             </summary>
         </member>
+        <member name="P:TaskHandler.TaskDetails.DequeuedAt">
+            <summary>
+            Timestamp when the task was read from the queue by the task runner.
+            Null if the task has not been dequeued yet.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.OnAbandoned">
+            <summary>
+            Callback invoked when the task ends canceled or is dropped, so that a result handle is always completed
+            even if the task function never ran. Null when not needed.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.ParentContext">
+            <summary>
+            Trace context captured at enqueue time; parent of the task job span.
+            Default: default(ActivityContext), meaning no parent.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.JobActivity">
+            <summary>
+            Task job span (enqueue to terminal state). Null when no listener is subscribed.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.SlotWaitActivity">
+            <summary>
+            Slot-wait stage span. Null when no listener is subscribed or once the slot is acquired.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskDetails.ExecuteActivity">
+            <summary>
+            Execute stage span. Null when no listener is subscribed or once the task completes.
+            </summary>
+        </member>
         <member name="M:TaskHandler.TaskDetails.#ctor">
             <summary>
             Instantiate.
@@ -92,6 +125,497 @@
         <member name="P:TaskHandler.TaskHandle`1.Task">
             <summary>
             Task that will complete with the result.
+            </summary>
+        </member>
+        <member name="T:TaskHandler.TaskHandlerTelemetry">
+            <summary>
+            Internal holder for the TaskHandler meter, activity source, and instruments, plus best-effort
+            recording helpers. Every helper swallows its own exceptions so that telemetry can never affect task
+            execution. When no listener is subscribed, spans are not created and measurements are discarded by
+            the runtime at negligible cost.
+            Thread safety: all members are safe to call concurrently.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetry.Version">
+            <summary>
+            Library version reported on the meter, activity source, and build-info gauge.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetry.Source">
+            <summary>
+            Activity source for all TaskHandler spans.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetry.Meter">
+            <summary>
+            Meter for all TaskHandler metrics.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.RegisterQueue(TaskHandler.TaskQueue)">
+            <summary>
+            Register a queue so its state is reported by the observable gauges.
+            </summary>
+            <param name="queue">Queue.</param>
+            <returns>Registration identifier, used to unregister.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.UnregisterQueue(System.Int64)">
+            <summary>
+            Unregister a queue from the observable gauges.
+            </summary>
+            <param name="id">Registration identifier.</param>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.StartEnqueue(System.String,TaskHandler.TaskDetails,System.Int32)">
+            <summary>
+            Start the producer span for an enqueue attempt. Returns null when no listener is subscribed.
+            </summary>
+            <param name="queueName">Queue name.</param>
+            <param name="details">Task details.</param>
+            <param name="queueDepth">Current queue depth.</param>
+            <returns>Activity, or null.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.CaptureParentContext(TaskHandler.TaskDetails,System.Diagnostics.Activity)">
+            <summary>
+            Capture the trace context that the task job span will use as its parent. Must be called before
+            the task is written into the queue so the consumer can never observe a missing context.
+            </summary>
+            <param name="details">Task details.</param>
+            <param name="enqueueActivity">Enqueue activity, or null.</param>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.EnqueueSucceeded(System.String,System.Diagnostics.Activity,System.DateTime)">
+            <summary>
+            Record a successful enqueue.
+            </summary>
+            <param name="queueName">Queue name.</param>
+            <param name="activity">Enqueue activity, or null.</param>
+            <param name="startedUtc">Time the enqueue attempt began.</param>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.EnqueueRejected(System.String,System.Diagnostics.Activity,System.DateTime,System.String,System.Exception)">
+            <summary>
+            Record a rejected enqueue.
+            </summary>
+            <param name="queueName">Queue name.</param>
+            <param name="activity">Enqueue activity, or null.</param>
+            <param name="startedUtc">Time the enqueue attempt began.</param>
+            <param name="errorType">Bounded error type.</param>
+            <param name="ex">Exception, or null.</param>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.EnqueueErrorType(System.Exception)">
+            <summary>
+            Map an enqueue exception to a bounded error type.
+            </summary>
+            <param name="ex">Exception.</param>
+            <returns>Error type.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.TaskDequeued(System.String,TaskHandler.TaskDetails)">
+            <summary>
+            Called by the task runner when a task is read from the queue. Starts the job span (back-dated to the
+            enqueue time, parented to the enqueue context), emits the queued stage, and starts the slot-wait stage.
+            Leaves Activity.Current unchanged.
+            </summary>
+            <param name="queueName">Queue name.</param>
+            <param name="details">Task details.</param>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.TaskStarting(System.String,TaskHandler.TaskDetails,System.Int32)">
+            <summary>
+            Called by the task runner when a concurrency slot has been acquired. Emits the slot-wait stage and
+            starts the execute stage span. On return, Activity.Current is the execute span (or unchanged when no
+            listener is subscribed) so the user function nests under it; the caller restores Activity.Current.
+            </summary>
+            <param name="queueName">Queue name.</param>
+            <param name="details">Task details.</param>
+            <param name="concurrencyLimit">Configured concurrency limit.</param>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.TaskDropped(System.String,TaskHandler.TaskDetails,System.Exception)">
+            <summary>
+            Called by the task runner when a dequeued task can never run because the runner stopped (or failed)
+            while the task waited for a concurrency slot.
+            </summary>
+            <param name="queueName">Queue name.</param>
+            <param name="details">Task details.</param>
+            <param name="ex">Exception that interrupted the slot wait.</param>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.TaskCompleted(System.String,TaskHandler.TaskDetails,System.Threading.Tasks.Task,System.DateTime)">
+            <summary>
+            Called from the completion continuation. Emits the execute stage and the terminal job metrics, and
+            closes the execute and job spans with an explicit status.
+            </summary>
+            <param name="queueName">Queue name.</param>
+            <param name="details">Task details.</param>
+            <param name="completedTask">Completed task.</param>
+            <param name="completedAt">Completion time.</param>
+            <returns>Outcome value.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.CancellationRequested(System.String,TaskHandler.TaskDetails,System.String)">
+            <summary>
+            Record a cancellation request issued by the queue, and annotate the task's execute span.
+            </summary>
+            <param name="queueName">Queue name.</param>
+            <param name="details">Task details.</param>
+            <param name="reason">Bounded cancellation reason.</param>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.Lifecycle(System.String,System.String)">
+            <summary>
+            Record a queue lifecycle transition.
+            </summary>
+            <param name="queueName">Queue name.</param>
+            <param name="lifecycleEvent">Bounded lifecycle event.</param>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.EventHandlerError(System.String,System.String,System.Exception)">
+            <summary>
+            Record an exception thrown by a user event handler.
+            </summary>
+            <param name="queueName">Queue name.</param>
+            <param name="eventName">Event handler name.</param>
+            <param name="ex">Exception.</param>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.RunnerError(System.String,System.Exception)">
+            <summary>
+            Record an unexpected exception that terminated the task runner.
+            </summary>
+            <param name="queueName">Queue name.</param>
+            <param name="ex">Exception.</param>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.StartRunWithTimeout(System.Int32)">
+            <summary>
+            Start the span for a TaskRunWithTimeout.Go call. Returns null when no listener is subscribed.
+            </summary>
+            <param name="timeoutMs">Timeout in milliseconds.</param>
+            <returns>Activity, or null.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.RunWithTimeoutCompleted(System.Diagnostics.Activity,System.DateTime,System.String,System.Exception)">
+            <summary>
+            Record the result of a TaskRunWithTimeout.Go call and close its span.
+            </summary>
+            <param name="activity">Activity, or null.</param>
+            <param name="startedUtc">Start time.</param>
+            <param name="outcome">Outcome value.</param>
+            <param name="ex">Exception, or null.</param>
+        </member>
+        <member name="M:TaskHandler.TaskHandlerTelemetry.ErrorType(System.Exception)">
+            <summary>
+            Bounded error type for an exception: its full type name.
+            </summary>
+            <param name="ex">Exception.</param>
+            <returns>Error type.</returns>
+        </member>
+        <member name="T:TaskHandler.TaskHandlerTelemetryNames">
+            <summary>
+            Stable public names for TaskHandler telemetry: the meter and activity source names, every metric
+            instrument name, every span name, every attribute (label) key, and the bounded attribute values.
+            These names are a public contract consumed by collectors and dashboards. They do not change
+            within a major version.
+            Thread safety: all members are constants and are safe to read from any thread.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.MeterName">
+            <summary>
+            Name of the <see cref="T:System.Diagnostics.Metrics.Meter"/> that emits all TaskHandler metrics.
+            Subscribe a collector to this name (for example Radiant's settings.Sources.AddMeter("TaskHandler")).
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.ActivitySourceName">
+            <summary>
+            Name of the <see cref="T:System.Diagnostics.ActivitySource"/> that emits all TaskHandler spans.
+            Subscribe a collector to this name (for example Radiant's settings.Sources.AddActivitySource("TaskHandler")).
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.TasksEnqueued">
+            <summary>
+            Counter of tasks accepted into a queue. Unit: {task}. Labels: taskhandler.queue.name.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.TasksRejected">
+            <summary>
+            Counter of enqueue attempts that were rejected (queue full, queue closed, canceled while waiting for space).
+            Unit: {task}. Labels: taskhandler.queue.name, error.type.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.EnqueueDuration">
+            <summary>
+            Histogram of the time taken to write a task into the queue, including any backpressure wait on a bounded queue.
+            Unit: s. Labels: taskhandler.queue.name, taskhandler.outcome.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.TasksCompleted">
+            <summary>
+            Counter of tasks that reached a terminal state. Unit: {task}.
+            Labels: taskhandler.queue.name, taskhandler.outcome, error.type (failure, timeout, and dropped only).
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.TaskDuration">
+            <summary>
+            Histogram of end-to-end task duration, from enqueue to terminal state. Unit: s.
+            Labels: taskhandler.queue.name, taskhandler.outcome.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.StageDuration">
+            <summary>
+            Histogram of per-stage task duration (queued, slot_wait, execute). Unit: s.
+            Labels: taskhandler.queue.name, taskhandler.stage, taskhandler.outcome.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.StageEvents">
+            <summary>
+            Counter of per-stage task events (one per stage a task leaves). Unit: {event}.
+            Labels: taskhandler.queue.name, taskhandler.stage, taskhandler.outcome.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.CancellationRequests">
+            <summary>
+            Counter of cancellation requests issued by the queue. Unit: {request}.
+            Labels: taskhandler.queue.name, taskhandler.cancel.reason.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.LastSuccess">
+            <summary>
+            Observable gauge of the Unix time (seconds) of the most recent successful task completion.
+            Unit: s. Labels: taskhandler.queue.name. Not reported until a task succeeds.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.QueueDepth">
+            <summary>
+            Observable gauge of tasks waiting in the queue. Unit: {task}. Labels: taskhandler.queue.name.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.QueueCapacity">
+            <summary>
+            Observable gauge of the configured queue capacity (MaxQueueSize). Reported for bounded queues only.
+            Unit: {task}. Labels: taskhandler.queue.name.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.ConcurrencyInUse">
+            <summary>
+            Observable gauge of concurrency slots in use (running tasks). Unit: {task}. Labels: taskhandler.queue.name.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.ConcurrencyLimit">
+            <summary>
+            Observable gauge of the configured concurrency limit (MaxConcurrentTasks). Unit: {task}.
+            Labels: taskhandler.queue.name.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.QueueProcessing">
+            <summary>
+            Observable gauge that is 1 while the queue is started and processing, and 0 otherwise. Unit: {state}.
+            Labels: taskhandler.queue.name.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.LifecycleEvents">
+            <summary>
+            Counter of queue lifecycle transitions. Unit: {event}. Labels: taskhandler.queue.name, taskhandler.lifecycle.event.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.EventHandlerErrors">
+            <summary>
+            Counter of exceptions thrown by user-supplied event handlers (caught and suppressed by the queue).
+            Unit: {error}. Labels: taskhandler.queue.name, taskhandler.event, error.type.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.RunnerErrors">
+            <summary>
+            Counter of unexpected exceptions that terminated the background task runner. Unit: {error}.
+            Labels: taskhandler.queue.name, error.type.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.RunWithTimeoutOperations">
+            <summary>
+            Counter of TaskRunWithTimeout.Go operations. Unit: {operation}. Labels: taskhandler.outcome, error.type.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.RunWithTimeoutDuration">
+            <summary>
+            Histogram of TaskRunWithTimeout.Go duration. Unit: s. Labels: taskhandler.outcome.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.BuildInfo">
+            <summary>
+            Observable gauge, always 1, carrying the library version. Unit: {info}. Labels: taskhandler.version.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.SpanEnqueue">
+            <summary>
+            Producer span covering a single enqueue call (including backpressure wait).
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.SpanTask">
+            <summary>
+            Consumer span covering one task job end to end (enqueue to terminal state). Parent: the enqueue span.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.SpanStageQueued">
+            <summary>
+            Child span of the task span covering time spent waiting in the queue.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.SpanStageSlotWait">
+            <summary>
+            Child span of the task span covering time spent waiting for a concurrency slot.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.SpanStageExecute">
+            <summary>
+            Child span of the task span covering user code execution. Spans started by user code nest under it.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.SpanRunWithTimeout">
+            <summary>
+            Internal span covering one TaskRunWithTimeout.Go call.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrQueueName">
+            <summary>
+            Attribute key: queue name (TaskQueue.Name). Bounded, metric-safe.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrOutcome">
+            <summary>
+            Attribute key: outcome. Bounded, metric-safe. See the Outcome* constants.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrStage">
+            <summary>
+            Attribute key: stage. Bounded, metric-safe. See the Stage* constants.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrCancelReason">
+            <summary>
+            Attribute key: cancellation reason. Bounded, metric-safe. See the CancelReason* constants.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrLifecycleEvent">
+            <summary>
+            Attribute key: lifecycle event. Bounded, metric-safe. See the Lifecycle* constants.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrEvent">
+            <summary>
+            Attribute key: event handler name (for example OnTaskFinished). Bounded, metric-safe.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrVersion">
+            <summary>
+            Attribute key: library version. Used on taskhandler.build.info only.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrErrorType">
+            <summary>
+            Attribute key (OpenTelemetry semantic convention): error type. The exception's full type name, or a
+            short code such as queue_full. Bounded, metric-safe.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrTaskId">
+            <summary>
+            Span-only attribute key: task GUID. High cardinality, never used as a metric label.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrTaskName">
+            <summary>
+            Span-only attribute key: user-supplied task name. High cardinality, never used as a metric label.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrTaskPriority">
+            <summary>
+            Span-only attribute key: task priority.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrQueueDepth">
+            <summary>
+            Span-only attribute key: queue depth observed when the task was enqueued.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrConcurrencyLimit">
+            <summary>
+            Span-only attribute key: configured concurrency limit observed when the task started.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.AttrTimeoutMs">
+            <summary>
+            Span-only attribute key: configured timeout in milliseconds (TaskRunWithTimeout).
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.OutcomeSuccess">
+            <summary>
+            Outcome value: the operation completed successfully.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.OutcomeFailure">
+            <summary>
+            Outcome value: the operation threw an exception other than a timeout.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.OutcomeTimeout">
+            <summary>
+            Outcome value: the operation exceeded its timeout.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.OutcomeCanceled">
+            <summary>
+            Outcome value: the operation was canceled.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.OutcomeDropped">
+            <summary>
+            Outcome value: the task was removed from the queue but never ran because the queue stopped first.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.OutcomeRejected">
+            <summary>
+            Outcome value: an enqueue attempt was rejected.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.StageQueued">
+            <summary>
+            Stage value: waiting in the queue.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.StageSlotWait">
+            <summary>
+            Stage value: waiting for a concurrency slot.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.StageExecute">
+            <summary>
+            Stage value: executing user code.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.CancelReasonStopAll">
+            <summary>
+            Cancellation reason value: Stop() canceled all running tasks.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.CancelReasonStopTask">
+            <summary>
+            Cancellation reason value: Stop(Guid) canceled one task.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.CancelReasonDispose">
+            <summary>
+            Cancellation reason value: Dispose() canceled running tasks.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.LifecycleStart">
+            <summary>
+            Lifecycle value: the queue started processing.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.LifecycleStop">
+            <summary>
+            Lifecycle value: the queue stopped processing.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.LifecycleDispose">
+            <summary>
+            Lifecycle value: the queue was disposed.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.ErrorQueueFull">
+            <summary>
+            Error type value: a bounded queue was full.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.ErrorQueueClosed">
+            <summary>
+            Error type value: the queue was closed (stopped) during the enqueue attempt.
             </summary>
         </member>
         <member name="T:TaskHandler.TaskInfo">
@@ -206,6 +730,9 @@
         <member name="T:TaskHandler.TaskQueue">
             <summary>
             Task queue.
+            Emits metrics and traces through the BCL Meter and ActivitySource named "TaskHandler"
+            (see <see cref="T:TaskHandler.TaskHandlerTelemetryNames"/> and TELEMETRY.md). Emission is best-effort, never throws,
+            and costs effectively nothing when no listener is subscribed.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.Logger">
@@ -225,6 +752,15 @@
             Maximum queue size. -1 for unbounded.
             Default: -1 (unbounded)
             </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.Name">
+            <summary>
+            Queue name, reported as the taskhandler.queue.name label on every TaskHandler metric and span.
+            Must be low-cardinality (a fixed name per logical queue, such as "ingest" or "email"); never use ids or
+            user input. Queues that share a name are aggregated together in the observable gauges.
+            Default: "default". Must not be null or empty.
+            </summary>
+            <exception cref="T:System.ArgumentNullException">Thrown when set to null or empty.</exception>
         </member>
         <member name="P:TaskHandler.TaskQueue.RunningCount">
             <summary>
@@ -288,6 +824,16 @@
             Boolean to indicate whether or not the task runner is running.
             </summary>
         </member>
+        <member name="P:TaskHandler.TaskQueue.IsProcessing">
+            <summary>
+            True while the queue is started and not disposed. Used by the queue-processing gauge.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.LastSuccessUnixSeconds">
+            <summary>
+            Unix time in seconds of the most recent successful task completion, or 0 if none.
+            </summary>
+        </member>
         <member name="M:TaskHandler.TaskQueue.#ctor(System.Int32,System.Int32)">
             <summary>
             Instantiate.
@@ -322,16 +868,21 @@
         <member name="M:TaskHandler.TaskQueue.AddTask(System.Guid,System.String,System.Collections.Generic.Dictionary{System.String,System.Object},System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task})">
             <summary>
             Add a task.
+            Emits the "taskhandler enqueue" span and the taskhandler.task.enqueued / taskhandler.task.rejected metrics.
             </summary>
             <param name="guid">Guid.</param>
             <param name="name">Name of the task.</param>
             <param name="metadata">Dictionary containing metadata.</param>
             <param name="func">Action.</param>
             <returns>TaskDetails.</returns>
+            <exception cref="T:System.ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
+            <exception cref="T:System.InvalidOperationException">Thrown when the task cannot be written to the queue (for example, a bounded queue is full).</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.AddTaskAsync(System.Guid,System.String,System.Collections.Generic.Dictionary{System.String,System.Object},System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task},System.Threading.CancellationToken)">
             <summary>
             Add a task asynchronously.
+            On a bounded queue that is full, waits for space (backpressure); the wait is measured by
+            taskhandler.queue.enqueue.duration.
             </summary>
             <param name="guid">Guid.</param>
             <param name="name">Name of the task.</param>
@@ -339,6 +890,8 @@
             <param name="func">Action.</param>
             <param name="cancellationToken">Cancellation token.</param>
             <returns>TaskDetails.</returns>
+            <exception cref="T:System.ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
+            <exception cref="T:System.OperationCanceledException">Thrown when cancellation is requested while waiting for queue space.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.EnqueueAsync(System.String,System.Func{System.Threading.CancellationToken,System.Threading.Tasks.Task},System.Int32,System.Nullable{System.TimeSpan},System.Threading.CancellationToken)">
             <summary>
@@ -454,6 +1007,14 @@
             Maximum queue size. -1 for unbounded.
             Default: -1 (unbounded). Minimum: -1 or greater than 0.
             </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueOptions.Name">
+            <summary>
+            Queue name, reported as the taskhandler.queue.name label on every TaskHandler metric and span.
+            Must be low-cardinality (a fixed name per logical queue); never use ids or user input.
+            Default: "default". Must not be null or empty.
+            </summary>
+            <exception cref="T:System.ArgumentNullException">Thrown when set to null or empty.</exception>
         </member>
         <member name="P:TaskHandler.TaskQueueOptions.Logger">
             <summary>
@@ -604,12 +1165,17 @@
         <member name="M:TaskHandler.TaskRunWithTimeout.Go``1(System.Threading.Tasks.Task{``0},System.Int32,System.Threading.CancellationTokenSource)">
             <summary>
             Run a task with a given timeout.
+            Emits the "taskhandler run_with_timeout" span and the taskhandler.run_with_timeout.* metrics
+            (outcome success, failure, canceled, or timeout).
             </summary>
             <typeparam name="T">Result type.</typeparam>
             <param name="task">Task.</param>
-            <param name="timeoutMs">Timeout in milliseconds.</param>
-            <param name="tokenSource">Cancellation token source.</param>
+            <param name="timeoutMs">Timeout in milliseconds. Minimum: 1.</param>
+            <param name="tokenSource">Cancellation token source, canceled when the timeout elapses.</param>
             <returns>Task.</returns>
+            <exception cref="T:System.ArgumentOutOfRangeException">Thrown when timeoutMs is less than 1.</exception>
+            <exception cref="T:System.ArgumentNullException">Thrown when tokenSource is null.</exception>
+            <exception cref="T:System.TimeoutException">Thrown when the task does not complete within the timeout.</exception>
         </member>
     </members>
 </doc>

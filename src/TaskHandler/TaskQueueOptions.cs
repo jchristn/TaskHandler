@@ -44,6 +44,25 @@ namespace TaskHandler
         }
 
         /// <summary>
+        /// Queue name, reported as the taskhandler.queue.name label on every TaskHandler metric and span.
+        /// Must be low-cardinality (a fixed name per logical queue); never use ids or user input.
+        /// Default: "default". Must not be null or empty.
+        /// </summary>
+        /// <exception cref="ArgumentNullException">Thrown when set to null or empty.</exception>
+        public string Name
+        {
+            get
+            {
+                return _Name;
+            }
+            set
+            {
+                if (String.IsNullOrEmpty(value)) throw new ArgumentNullException(nameof(Name));
+                _Name = value;
+            }
+        }
+
+        /// <summary>
         /// Logger callback.
         /// Default: null.
         /// </summary>
@@ -97,6 +116,7 @@ namespace TaskHandler
 
         private int _MaxConcurrentTasks = 32;
         private int _MaxQueueSize = -1;
+        private string _Name = "default";
 
         #endregion
 

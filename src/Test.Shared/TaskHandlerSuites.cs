@@ -32,7 +32,8 @@ namespace Test.Shared
             TaskInfoSuite.Build(),
             TaskProgressModelSuite.Build(),
             TaskDetailsSuite.Build(),
-            TimeoutSuite.Build()
+            TimeoutSuite.Build(),
+            TelemetrySuite.Build()
         };
 
         /// <summary>

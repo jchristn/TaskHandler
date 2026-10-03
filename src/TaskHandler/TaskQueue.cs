@@ -3,6 +3,7 @@ namespace TaskHandler
     using System;
     using System.Collections.Concurrent;
     using System.Collections.Generic;
+    using System.Diagnostics;
     using System.Linq;
     using System.Threading;
     using System.Threading.Channels;
@@ -10,6 +11,9 @@ namespace TaskHandler
 
     /// <summary>
     /// Task queue.
+    /// Emits metrics and traces through the BCL Meter and ActivitySource named "TaskHandler"
+    /// (see <see cref="TaskHandlerTelemetryNames"/> and TELEMETRY.md). Emission is best-effort, never throws,
+    /// and costs effectively nothing when no listener is subscribed.
     /// </summary>
     public class TaskQueue : IDisposable, IAsyncDisposable
     {
@@ -52,6 +56,26 @@ namespace TaskHandler
             {
                 if (value < -1 || value == 0) throw new ArgumentOutOfRangeException(nameof(MaxQueueSize), "MaxQueueSize must be -1 (unbounded) or greater than 0");
                 _MaxQueueSize = value;
+            }
+        }
+
+        /// <summary>
+        /// Queue name, reported as the taskhandler.queue.name label on every TaskHandler metric and span.
+        /// Must be low-cardinality (a fixed name per logical queue, such as "ingest" or "email"); never use ids or
+        /// user input. Queues that share a name are aggregated together in the observable gauges.
+        /// Default: "default". Must not be null or empty.
+        /// </summary>
+        /// <exception cref="ArgumentNullException">Thrown when set to null or empty.</exception>
+        public string Name
+        {
+            get
+            {
+                return _Name;
+            }
+            set
+            {
+                if (String.IsNullOrEmpty(value)) throw new ArgumentNullException(nameof(Name));
+                _Name = value;
             }
         }
 
@@ -141,11 +165,36 @@ namespace TaskHandler
             }
         }
 
+        /// <summary>
+        /// True while the queue is started and not disposed. Used by the queue-processing gauge.
+        /// </summary>
+        internal bool IsProcessing
+        {
+            get
+            {
+                return _IsStarted && !_IsDisposed;
+            }
+        }
+
+        /// <summary>
+        /// Unix time in seconds of the most recent successful task completion, or 0 if none.
+        /// </summary>
+        internal double LastSuccessUnixSeconds
+        {
+            get
+            {
+                long ticks = Interlocked.Read(ref _LastSuccessTicks);
+                if (ticks <= 0) return 0;
+                return (ticks - _UnixEpochTicks) / (double)TimeSpan.TicksPerSecond;
+            }
+        }
+
         #endregion
 
         #region Private-Members
 
         private string _Header = "[TaskHandler] ";
+        private string _Name = "default";
         private int _MaxConcurrentTasks = 32;
         private int _MaxQueueSize = -1;
         private ConcurrentDictionary<Guid, TaskDetails> _RunningTasks = new ConcurrentDictionary<Guid, TaskDetails>();
@@ -171,6 +220,11 @@ namespace TaskHandler
         private DateTime? _LastTaskStarted = null;
         private DateTime? _LastTaskCompleted = null;
         private const int _MaxTimingSamples = 1000;
+
+        // Telemetry
+        private static readonly long _UnixEpochTicks = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks;
+        private long _TelemetryId = 0;
+        private long _LastSuccessTicks = 0;
 
         #endregion
 
@@ -207,6 +261,7 @@ namespace TaskHandler
             }
 
             _concurrencySemaphore = new SemaphoreSlim(maxConcurrentTasks, maxConcurrentTasks);
+            _TelemetryId = TaskHandlerTelemetry.RegisterQueue(this);
         }
 
         /// <summary>
@@ -216,6 +271,7 @@ namespace TaskHandler
         public TaskQueue(TaskQueueOptions options)
             : this(options.MaxConcurrentTasks, options.MaxQueueSize)
         {
+            Name = options.Name;
             Logger = options.Logger;
             OnTaskAdded = options.OnTaskAdded;
             OnTaskStarted = options.OnTaskStarted;
@@ -253,10 +309,16 @@ namespace TaskHandler
                 _IsDisposed = true;
 
                 Logger?.Invoke(_Header + "disposing");
+                TaskHandlerTelemetry.Lifecycle(_Name, TaskHandlerTelemetryNames.LifecycleDispose);
 
                 foreach (KeyValuePair<Guid, TaskDetails> task in _RunningTasks)
                 {
                     Logger?.Invoke(_Header + "canceling task GUID " + task.Key.ToString());
+                    if (!task.Value.TokenSource.IsCancellationRequested)
+                    {
+                        TaskHandlerTelemetry.CancellationRequested(_Name, task.Value, TaskHandlerTelemetryNames.CancelReasonDispose);
+                    }
+
                     task.Value.TokenSource.Cancel();
                 }
 
@@ -267,6 +329,7 @@ namespace TaskHandler
 
                 _TaskRunnerTokenSource?.Dispose();
                 _concurrencySemaphore?.Dispose();
+                TaskHandlerTelemetry.UnregisterQueue(_TelemetryId);
             }
         }
 
@@ -282,44 +345,21 @@ namespace TaskHandler
 
         /// <summary>
         /// Add a task.
+        /// Emits the "taskhandler enqueue" span and the taskhandler.task.enqueued / taskhandler.task.rejected metrics.
         /// </summary>
         /// <param name="guid">Guid.</param>
         /// <param name="name">Name of the task.</param>
         /// <param name="metadata">Dictionary containing metadata.</param>
         /// <param name="func">Action.</param>
         /// <returns>TaskDetails.</returns>
+        /// <exception cref="ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
+        /// <exception cref="InvalidOperationException">Thrown when the task cannot be written to the queue (for example, a bounded queue is full).</exception>
         public TaskDetails AddTask(Guid guid, string name, Dictionary<string, object> metadata, Func<CancellationToken, Task> func)
         {
             if (String.IsNullOrEmpty(name)) throw new ArgumentNullException(nameof(name));
             if (func == null) throw new ArgumentNullException(nameof(func));
 
-            // If channel is completed (after Stop()), recreate it
-            if (_queueChannel.Reader.Completion.IsCompleted)
-            {
-                lock (_StateLock)
-                {
-                    if (_queueChannel.Reader.Completion.IsCompleted)
-                    {
-                        if (_MaxQueueSize > 0)
-                        {
-                            _queueChannel = Channel.CreateBounded<TaskDetails>(new BoundedChannelOptions(_MaxQueueSize)
-                            {
-                                SingleReader = true,
-                                SingleWriter = false,
-                                FullMode = BoundedChannelFullMode.Wait
-                            });
-                        }
-                        else
-                        {
-                            _queueChannel = Channel.CreateUnbounded<TaskDetails>(new UnboundedChannelOptions
-                            {
-                                SingleReader = true,
-                                SingleWriter = false
-                            });
-                        }
-                    }
-                }
-            }
+            EnsureChannelOpen();
 
             TaskDetails details = new TaskDetails
             {
@@ -329,19 +369,28 @@ namespace TaskHandler
                 Function = func
             };
 
+            DateTime enqueueStarted = DateTime.UtcNow;
+            Activity enqueueActivity = TaskHandlerTelemetry.StartEnqueue(_Name, details, _queuedCount);
+            TaskHandlerTelemetry.CaptureParentContext(details, enqueueActivity);
+
             if (!_queueChannel.Writer.TryWrite(details))
             {
+                string errorType = _MaxQueueSize > 0 ? TaskHandlerTelemetryNames.ErrorQueueFull : TaskHandlerTelemetryNames.ErrorQueueClosed;
+                TaskHandlerTelemetry.EnqueueRejected(_Name, enqueueActivity, enqueueStarted, errorType, null);
                 throw new InvalidOperationException("Failed to enqueue task.");
             }
 
             Interlocked.Increment(ref _queuedCount);
             Interlocked.Increment(ref _TotalEnqueued);
-            SafeInvokeEvent(OnTaskAdded, details);
+            TaskHandlerTelemetry.EnqueueSucceeded(_Name, enqueueActivity, enqueueStarted);
+            SafeInvokeEvent(OnTaskAdded, nameof(OnTaskAdded), details);
             return details;
         }
 
         /// <summary>
         /// Add a task asynchronously.
+        /// On a bounded queue that is full, waits for space (backpressure); the wait is measured by
+        /// taskhandler.queue.enqueue.duration.
         /// </summary>
         /// <param name="guid">Guid.</param>
         /// <param name="name">Name of the task.</param>
@@ -349,6 +398,8 @@ namespace TaskHandler
         /// <param name="func">Action.</param>
         /// <param name="cancellationToken">Cancellation token.</param>
         /// <returns>TaskDetails.</returns>
+        /// <exception cref="ArgumentNullException">Thrown when name is null or empty, or func is null.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when cancellation is requested while waiting for queue space.</exception>
         public async Task<TaskDetails> AddTaskAsync(
             Guid guid,
             string name,
@@ -356,51 +407,7 @@ namespace TaskHandler
             Func<CancellationToken, Task> func,
             CancellationToken cancellationToken = default)
         {
-            if (String.IsNullOrEmpty(name)) throw new ArgumentNullException(nameof(name));
-            if (func == null) throw new ArgumentNullException(nameof(func));
-
-            // If channel is completed (after Stop()), recreate it
-            if (_queueChannel.Reader.Completion.IsCompleted)
-            {
-                lock (_StateLock)
-                {
-                    if (_queueChannel.Reader.Completion.IsCompleted)
-                    {
-                        if (_MaxQueueSize > 0)
-                        {
-                            _queueChannel = Channel.CreateBounded<TaskDetails>(new BoundedChannelOptions(_MaxQueueSize)
-                            {
-                                SingleReader = true,
-                                SingleWriter = false,
-                                FullMode = BoundedChannelFullMode.Wait
-                            });
-                        }
-                        else
-                        {
-                            _queueChannel = Channel.CreateUnbounded<TaskDetails>(new UnboundedChannelOptions
-                            {
-                                SingleReader = true,
-                                SingleWriter = false
-                            });
-                        }
-                    }
-                }
-            }
-
-            TaskDetails details = new TaskDetails
-            {
-                Guid = guid,
-                Name = name,
-                Metadata = metadata,
-                Function = func
-            };
-
-            await _queueChannel.Writer.WriteAsync(details, cancellationToken).ConfigureAwait(false);
-
-            Interlocked.Increment(ref _queuedCount);
-            Interlocked.Increment(ref _TotalEnqueued);
-            SafeInvokeEvent(OnTaskAdded, details);
-            return details;
+            return await AddTaskInternalAsync(guid, name, metadata, func, 0, cancellationToken, null).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -443,8 +450,7 @@ namespace TaskHandler
                 };
             }
 
-            TaskDetails details = await AddTaskAsync(Guid.NewGuid(), name, null, wrappedFunc, cancellationToken).ConfigureAwait(false);
-            details.Priority = priority;
+            TaskDetails details = await AddTaskInternalAsync(Guid.NewGuid(), name, null, wrappedFunc, priority, cancellationToken, null).ConfigureAwait(false);
             return details.Guid;
         }
 
@@ -511,8 +517,7 @@ namespace TaskHandler
                 }
             };
 
-            TaskDetails details = await AddTaskAsync(handle.Id, name, null, wrappedFunc, cancellationToken).ConfigureAwait(false);
-            details.Priority = priority;
+            await AddTaskInternalAsync(handle.Id, name, null, wrappedFunc, priority, cancellationToken, handle.SetCanceled).ConfigureAwait(false);
             return handle;
         }
 
@@ -581,8 +586,7 @@ namespace TaskHandler
                 }
             };
 
-            TaskDetails details = await AddTaskAsync(handle.Id, name, null, wrappedFunc, cancellationToken).ConfigureAwait(false);
-            details.Priority = priority;
+            await AddTaskInternalAsync(handle.Id, name, null, wrappedFunc, priority, cancellationToken, handle.SetCanceled).ConfigureAwait(false);
             return handle;
         }
 
@@ -634,8 +638,7 @@ namespace TaskHandler
                 };
             }
 
-            TaskDetails details = await AddTaskAsync(Guid.NewGuid(), name, null, wrappedFunc, cancellationToken).ConfigureAwait(false);
-            details.Priority = priority;
+            TaskDetails details = await AddTaskInternalAsync(Guid.NewGuid(), name, null, wrappedFunc, priority, cancellationToken, null).ConfigureAwait(false);
             return details.Guid;
         }
 
@@ -717,29 +720,11 @@ namespace TaskHandler
                 }
 
                 // Recreate channel if it was completed
-                if (_queueChannel.Reader.Completion.IsCompleted)
-                {
-                    if (_MaxQueueSize > 0)
-                    {
-                        _queueChannel = Channel.CreateBounded<TaskDetails>(new BoundedChannelOptions(_MaxQueueSize)
-                        {
-                            SingleReader = true,
-                            SingleWriter = false,
-                            FullMode = BoundedChannelFullMode.Wait
-                        });
-                    }
-                    else
-                    {
-                        _queueChannel = Channel.CreateUnbounded<TaskDetails>(new UnboundedChannelOptions
-                        {
-                            SingleReader = true,
-                            SingleWriter = false
-                        });
-                    }
-                }
+                EnsureChannelOpen();
 
                 _TaskRunner = Task.Run(() => TaskRunner(_TaskRunnerToken), _TaskRunnerToken);
-                SafeInvokeEvent(OnProcessingStarted, EventArgs.Empty);
+                TaskHandlerTelemetry.Lifecycle(_Name, TaskHandlerTelemetryNames.LifecycleStart);
+                SafeInvokeEvent(OnProcessingStarted, nameof(OnProcessingStarted), EventArgs.Empty);
             }
         }
 
@@ -766,6 +751,7 @@ namespace TaskHandler
 
                 Logger?.Invoke(_Header + "stopping (" + _RunningTasks.Count + " running tasks)");
                 _IsStarted = false;
+                TaskHandlerTelemetry.Lifecycle(_Name, TaskHandlerTelemetryNames.LifecycleStop);
 
                 // Complete the channel (no more tasks accepted)
                 _queueChannel.Writer.Complete();
@@ -779,8 +765,9 @@ namespace TaskHandler
                         if (!task.Value.TokenSource.IsCancellationRequested)
                         {
                             Logger?.Invoke(_Header + "canceling task " + task.Key.ToString());
+                            TaskHandlerTelemetry.CancellationRequested(_Name, task.Value, TaskHandlerTelemetryNames.CancelReasonStopAll);
                             task.Value.TokenSource.Cancel();
-                            SafeInvokeEvent(OnTaskCanceled, task.Value);
+                            SafeInvokeEvent(OnTaskCanceled, nameof(OnTaskCanceled), task.Value);
                         }
                     }
                 }
@@ -790,7 +777,7 @@ namespace TaskHandler
                     _TaskRunnerTokenSource.Cancel();
                 }
 
-                SafeInvokeEvent(OnProcessingStopped, EventArgs.Empty);
+                SafeInvokeEvent(OnProcessingStopped, nameof(OnProcessingStopped), EventArgs.Empty);
                 _TaskRunner = null;
             }
         }
@@ -848,8 +835,9 @@ namespace TaskHandler
             if (_RunningTasks.TryGetValue(guid, out task))
             {
                 Logger?.Invoke(_Header + "canceling task " + guid.ToString());
+                TaskHandlerTelemetry.CancellationRequested(_Name, task, TaskHandlerTelemetryNames.CancelReasonStopTask);
                 task.TokenSource.Cancel();
-                SafeInvokeEvent(OnTaskCanceled, task);
+                SafeInvokeEvent(OnTaskCanceled, nameof(OnTaskCanceled), task);
             }
             else
             {
@@ -861,21 +849,95 @@ namespace TaskHandler
 
         #region Private-Methods
 
-        private void SafeInvokeEvent<T>(EventHandler<T> handler, T args)
+        private void EnsureChannelOpen()
         {
-            if (handler == null) return;
+            // If channel is completed (after Stop()), recreate it
+            if (!_queueChannel.Reader.Completion.IsCompleted) return;
 
-            try
+            lock (_StateLock)
             {
-                handler.Invoke(this, args);
-            }
-            catch (Exception ex)
-            {
-                Logger?.Invoke(_Header + "exception in event handler: " + ex.ToString());
+                if (!_queueChannel.Reader.Completion.IsCompleted) return;
+
+                if (_MaxQueueSize > 0)
+                {
+                    _queueChannel = Channel.CreateBounded<TaskDetails>(new BoundedChannelOptions(_MaxQueueSize)
+                    {
+                        SingleReader = true,
+                        SingleWriter = false,
+                        FullMode = BoundedChannelFullMode.Wait
+                    });
+                }
+                else
+                {
+                    _queueChannel = Channel.CreateUnbounded<TaskDetails>(new UnboundedChannelOptions
+                    {
+                        SingleReader = true,
+                        SingleWriter = false
+                    });
+                }
             }
         }
 
-        private void SafeInvokeEvent(EventHandler handler, EventArgs args)
+        private async Task<TaskDetails> AddTaskInternalAsync(
+            Guid guid,
+            string name,
+            Dictionary<string, object> metadata,
+            Func<CancellationToken, Task> func,
+            int priority,
+            CancellationToken cancellationToken,
+            Action onAbandoned)
+        {
+            if (String.IsNullOrEmpty(name)) throw new ArgumentNullException(nameof(name));
+            if (func == null) throw new ArgumentNullException(nameof(func));
+
+            EnsureChannelOpen();
+
+            TaskDetails details = new TaskDetails
+            {
+                Guid = guid,
+                Name = name,
+                Metadata = metadata,
+                Function = func,
+                Priority = priority,
+                OnAbandoned = onAbandoned
+            };
+
+            DateTime enqueueStarted = DateTime.UtcNow;
+            Activity enqueueActivity = TaskHandlerTelemetry.StartEnqueue(_Name, details, _queuedCount);
+            TaskHandlerTelemetry.CaptureParentContext(details, enqueueActivity);
+
+            try
+            {
+                await _queueChannel.Writer.WriteAsync(details, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                TaskHandlerTelemetry.EnqueueRejected(_Name, enqueueActivity, enqueueStarted, TaskHandlerTelemetry.EnqueueErrorType(ex), ex);
+                throw;
+            }
+
+            Interlocked.Increment(ref _queuedCount);
+            Interlocked.Increment(ref _TotalEnqueued);
+            TaskHandlerTelemetry.EnqueueSucceeded(_Name, enqueueActivity, enqueueStarted);
+            SafeInvokeEvent(OnTaskAdded, nameof(OnTaskAdded), details);
+            return details;
+        }
+
+        private void InvokeAbandoned(TaskDetails taskDetails)
+        {
+            // A task canceled before Task.Run invoked its function never reaches the result wrapper, so its
+            // handle would otherwise never complete. Handle completion is idempotent.
+            try
+            {
+                taskDetails.OnAbandoned?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                Logger?.Invoke(_Header + "exception completing abandoned task handle: " + ex.ToString());
+            }
+        }
+
+        private void SafeInvokeEvent<T>(EventHandler<T> handler, string eventName, T args)
         {
             if (handler == null) return;
 
@@ -886,11 +948,31 @@ namespace TaskHandler
             catch (Exception ex)
             {
                 Logger?.Invoke(_Header + "exception in event handler: " + ex.ToString());
+                TaskHandlerTelemetry.EventHandlerError(_Name, eventName, ex);
+            }
+        }
+
+        private void SafeInvokeEvent(EventHandler handler, string eventName, EventArgs args)
+        {
+            if (handler == null) return;
+
+            try
+            {
+                handler.Invoke(this, args);
+            }
+            catch (Exception ex)
+            {
+                Logger?.Invoke(_Header + "exception in event handler: " + ex.ToString());
+                TaskHandlerTelemetry.EventHandlerError(_Name, eventName, ex);
             }
         }
 
         private async Task TaskRunner(CancellationToken token)
         {
+            // Detach from whatever span was current when Start() was called, so each task's spans are parented
+            // only to the context captured when that task was enqueued.
+            Activity.Current = null;
+
             try
             {
 #if NETSTANDARD2_0
@@ -898,69 +980,13 @@ namespace TaskHandler
                 {
                     while (_queueChannel.Reader.TryRead(out TaskDetails taskDetails))
                     {
-                        Interlocked.Decrement(ref _queuedCount);
-
-                        // Wait for available slot
-                        await _concurrencySemaphore.WaitAsync(token).ConfigureAwait(false);
-
-                        // Add to running tasks
-                        _RunningTasks.TryAdd(taskDetails.Guid, taskDetails);
-
-                        // Track timing
-                        taskDetails.StartedAt = DateTime.UtcNow;
-                        _LastTaskStarted = taskDetails.StartedAt;
-                        TimeSpan waitTime = taskDetails.StartedAt.Value - taskDetails.EnqueuedAt;
-                        _WaitTimes.Enqueue(waitTime);
-                        while (_WaitTimes.Count > _MaxTimingSamples)
-                        {
-                            _WaitTimes.TryDequeue(out TimeSpan discarded);
-                        }
-
-                        // Start task with continuation
-                        taskDetails.Task = Task.Run(() => taskDetails.Function(taskDetails.Token), taskDetails.Token);
-
-                        Logger?.Invoke(_Header + "started task " + taskDetails.Guid.ToString() + " (" + _RunningTasks.Count + " running tasks)");
-                        SafeInvokeEvent(OnTaskStarted, taskDetails);
-
-                        // Set up continuation to handle completion
-                        Task continuation = taskDetails.Task.ContinueWith(
-                            completedTask => HandleTaskCompletion(taskDetails, completedTask),
-                            TaskScheduler.Default
-                        );
+                        await DispatchAsync(taskDetails, token).ConfigureAwait(false);
                     }
                 }
 #else
                 await foreach (TaskDetails taskDetails in _queueChannel.Reader.ReadAllAsync(token).ConfigureAwait(false))
                 {
-                    Interlocked.Decrement(ref _queuedCount);
-
-                    // Wait for available slot
-                    await _concurrencySemaphore.WaitAsync(token).ConfigureAwait(false);
-
-                    // Add to running tasks
-                    _RunningTasks.TryAdd(taskDetails.Guid, taskDetails);
-
-                    // Track timing
-                    taskDetails.StartedAt = DateTime.UtcNow;
-                    _LastTaskStarted = taskDetails.StartedAt;
-                    TimeSpan waitTime = taskDetails.StartedAt.Value - taskDetails.EnqueuedAt;
-                    _WaitTimes.Enqueue(waitTime);
-                    while (_WaitTimes.Count > _MaxTimingSamples)
-                    {
-                        _WaitTimes.TryDequeue(out TimeSpan discarded);
-                    }
-
-                    // Start task with continuation
-                    taskDetails.Task = Task.Run(() => taskDetails.Function(taskDetails.Token), taskDetails.Token);
-
-                    Logger?.Invoke(_Header + "started task " + taskDetails.Guid.ToString() + " (" + _RunningTasks.Count + " running tasks)");
-                    SafeInvokeEvent(OnTaskStarted, taskDetails);
-
-                    // Set up continuation to handle completion
-                    Task continuation = taskDetails.Task.ContinueWith(
-                        completedTask => HandleTaskCompletion(taskDetails, completedTask),
-                        TaskScheduler.Default
-                    );
+                    await DispatchAsync(taskDetails, token).ConfigureAwait(false);
                 }
 #endif
             }
@@ -971,13 +997,63 @@ namespace TaskHandler
             catch (Exception e)
             {
                 Logger?.Invoke(_Header + "task runner exception: " + Environment.NewLine + e.ToString());
+                if (!_IsDisposed) TaskHandlerTelemetry.RunnerError(_Name, e);
             }
             finally
             {
-                SafeInvokeEvent(OnProcessingStopped, EventArgs.Empty);
+                SafeInvokeEvent(OnProcessingStopped, nameof(OnProcessingStopped), EventArgs.Empty);
             }
 
             Logger?.Invoke(_Header + "task runner exiting");
+        }
+
+        private async Task DispatchAsync(TaskDetails taskDetails, CancellationToken token)
+        {
+            Interlocked.Decrement(ref _queuedCount);
+            taskDetails.DequeuedAt = DateTime.UtcNow;
+            TaskHandlerTelemetry.TaskDequeued(_Name, taskDetails);
+
+            // Wait for available slot
+            try
+            {
+                await _concurrencySemaphore.WaitAsync(token).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                TaskHandlerTelemetry.TaskDropped(_Name, taskDetails, ex);
+                InvokeAbandoned(taskDetails);
+                throw;
+            }
+
+            // Track timing
+            taskDetails.StartedAt = DateTime.UtcNow;
+            _LastTaskStarted = taskDetails.StartedAt;
+            TimeSpan waitTime = taskDetails.StartedAt.Value - taskDetails.EnqueuedAt;
+            _WaitTimes.Enqueue(waitTime);
+            while (_WaitTimes.Count > _MaxTimingSamples)
+            {
+                _WaitTimes.TryDequeue(out TimeSpan discarded);
+            }
+
+            // Open the execute span before the task becomes visible in RunningTasks, so a Stop(guid) issued as soon
+            // as the task appears is recorded on it. The span (when subscribed) stays current while Task.Run
+            // captures the execution context, so spans and logs created by the user function nest under it.
+            TaskHandlerTelemetry.TaskStarting(_Name, taskDetails, _MaxConcurrentTasks);
+
+            // Add to running tasks
+            _RunningTasks.TryAdd(taskDetails.Guid, taskDetails);
+
+            taskDetails.Task = Task.Run(() => taskDetails.Function(taskDetails.Token), taskDetails.Token);
+            Activity.Current = null;
+
+            Logger?.Invoke(_Header + "started task " + taskDetails.Guid.ToString() + " (" + _RunningTasks.Count + " running tasks)");
+            SafeInvokeEvent(OnTaskStarted, nameof(OnTaskStarted), taskDetails);
+
+            // Set up continuation to handle completion
+            Task continuation = taskDetails.Task.ContinueWith(
+                completedTask => HandleTaskCompletion(taskDetails, completedTask),
+                TaskScheduler.Default
+            );
         }
 
         private void HandleTaskCompletion(TaskDetails taskDetails, Task completedTask)
@@ -1002,24 +1078,29 @@ namespace TaskHandler
                     }
                 }
 
+                // Record telemetry (best-effort) before user event handlers run
+                TaskHandlerTelemetry.TaskCompleted(_Name, taskDetails, completedTask, completedAt);
+
                 // Fire appropriate event and update counters
                 if (completedTask.Status == TaskStatus.RanToCompletion)
                 {
                     Interlocked.Increment(ref _TotalCompleted);
+                    Interlocked.Exchange(ref _LastSuccessTicks, completedAt.Ticks);
                     Logger?.Invoke(_Header + "task " + taskDetails.Guid.ToString() + " completed");
-                    SafeInvokeEvent(OnTaskFinished, taskDetails);
+                    SafeInvokeEvent(OnTaskFinished, nameof(OnTaskFinished), taskDetails);
                 }
                 else if (completedTask.Status == TaskStatus.Faulted)
                 {
                     Interlocked.Increment(ref _TotalFailed);
                     Logger?.Invoke(_Header + "task " + taskDetails.Guid.ToString() + " faulted");
-                    SafeInvokeEvent(OnTaskFaulted, taskDetails);
+                    SafeInvokeEvent(OnTaskFaulted, nameof(OnTaskFaulted), taskDetails);
                 }
                 else if (completedTask.Status == TaskStatus.Canceled)
                 {
                     Interlocked.Increment(ref _TotalCanceled);
+                    InvokeAbandoned(taskDetails);
                     Logger?.Invoke(_Header + "task " + taskDetails.Guid.ToString() + " canceled");
-                    SafeInvokeEvent(OnTaskCanceled, taskDetails);
+                    SafeInvokeEvent(OnTaskCanceled, nameof(OnTaskCanceled), taskDetails);
                 }
             }
             finally

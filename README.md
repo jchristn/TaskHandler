@@ -4,7 +4,7 @@
 
 [![NuGet Version](https://img.shields.io/nuget/v/TaskHandler.svg?style=flat)](https://www.nuget.org/packages/TaskHandler/) [![NuGet](https://img.shields.io/nuget/dt/TaskHandler.svg)](https://www.nuget.org/packages/TaskHandler)
 
-TaskHandler is a simple, lightweight C# library for managing asynchronous task queues with precise concurrency control. It provides a clean API for queuing tasks, controlling how many run concurrently, and monitoring their lifecycle—all without relinquishing control of your application.
+TaskHandler is a simple, lightweight C# library for managing asynchronous task queues with precise concurrency control. It provides a clean API for queuing tasks, controlling how many run concurrently, and monitoring their lifecycle, all without relinquishing control of your application.
 
 ## Table of Contents
 
@@ -60,6 +60,7 @@ TaskHandler is a simple, lightweight C# library for managing asynchronous task q
   - [Statistics and Metrics](#statistics-and-metrics)
   - [Progress Reporting](#progress-reporting)
   - [Combined Example - Statistics + Progress](#combined-example---statistics--progress)
+- [Observability (Metrics and Traces)](#observability-metrics-and-traces)
 - [Feedback and Issues](#feedback-and-issues)
 - [Contributing](#contributing)
 - [License](#license)
@@ -91,6 +92,7 @@ Monitor every stage of task execution with built-in events:
 - `OnTaskFinished`: When a task completes successfully
 - `OnTaskFaulted`: When a task throws an exception
 - `OnTaskCanceled`: When a task is canceled
+- Built-in OpenTelemetry-compatible **metrics and traces** (queue depth, concurrency in use, per-stage latency, outcomes, and errors by type) for Prometheus, Tempo, and Grafana. See [Observability](#observability-metrics-and-traces).
 
 ### 🛡️ **Robust Error Handling**
 - Tasks that fault don't crash your application
@@ -1279,46 +1281,17 @@ This ensures compatibility with:
 - Xamarin
 - Unity (2021.2+)
 
+Dependencies: `System.Threading.Channels` and `System.Diagnostics.DiagnosticSource` on the netstandard targets (plus `Microsoft.Bcl.AsyncInterfaces` on netstandard2.0). The net8.0 and net10.0 builds have no package dependencies.
+
 ## Testing
 
-The repository includes comprehensive automated tests in the `Test.Automated` project:
+Tests are defined once in `src/Test.Shared` using [Touchstone](https://github.com/jchristn/touchstone) and executed by three runners. The corpus contains 136 positive and negative cases covering construction and validation, enqueue and execution, concurrency control, cancellation, lifecycle, events, `TaskHandle<T>`, statistics, progress, priority, `TaskInfo`, `TaskRunWithTimeout`, and telemetry (every metric and span family, including failure, timeout, cancellation, rejection, drop, and no-listener paths).
 
 ```bash
-cd src/Test.Automated
-dotnet run
+cd src/Test.Automated && dotnet run          # Touchstone CLI runner
+dotnet test src/Test.Xunit/Test.Xunit.csproj # xUnit host
+dotnet test src/Test.Nunit/Test.Nunit.csproj # NUnit host
 ```
-
-The test suite includes 38 comprehensive tests covering:
-
-**Core Functionality Tests (Tests 1-20):**
-- Basic task enqueueing and execution
-- Concurrency limit enforcement
-- Task cancellation (individual and batch)
-- State management and disposal
-- Error handling in event handlers
-- Multiple start/stop cycles
-- Race condition safety
-- Timeout functionality
-- High throughput scenarios
-- Queue statistics accuracy
-
-**Advanced Features Tests (Tests 21-30):**
-- TaskHandle<T> with result retrieval
-- TaskHandle<T> with exception handling
-- TaskHandle<T> with cancellation
-- TaskQueueOptions pattern
-- GetRunningTasksInfo() method
-- EnqueueAsync() with timeout (success case)
-- EnqueueAsync() with timeout (timeout case)
-- Task priority property
-- TaskQueue.Create() factory method
-- Multiple concurrent tasks with results
-
-**Statistics and Progress Tests (Tests 31-38):**
-- Statistics tracking and accuracy
-- Progress reporting functionality
-
-All tests include clear PASS/FAIL indicators and detailed error messages.
 
 ## Advanced Features
 
@@ -1884,6 +1857,37 @@ Console.WriteLine(finalStats.ToString());
 
 await queue.DisposeAsync();
 ```
+
+## Observability (Metrics and Traces)
+
+Starting with v2.2.0, `TaskQueue` and `TaskRunWithTimeout` emit metrics and traces through the standard .NET `Meter` and `ActivitySource`, both named **`TaskHandler`**. TaskHandler references no exporter or telemetry SDK; your application chooses where the data goes. With nothing subscribed, the cost is effectively zero.
+
+Give each queue a short, fixed name. It becomes the `taskhandler.queue.name` label:
+
+```csharp
+TaskQueue queue = TaskQueue.Create(o =>
+{
+    o.Name = "ingest";            // low-cardinality: never an id or user input
+    o.MaxConcurrentTasks = 8;
+    o.MaxQueueSize = 1000;
+});
+```
+
+Subscribe from your host, for example with [Radiant](https://www.nuget.org/packages/Radiant) or the OpenTelemetry SDK:
+
+```csharp
+settings.Sources.AddMeter(TaskHandlerTelemetryNames.MeterName);           // "TaskHandler"
+settings.Sources.AddActivitySource(TaskHandlerTelemetryNames.ActivitySourceName);
+```
+
+What you get:
+
+- **Where the time went:** per-stage latency histograms for `queued` (waiting in the queue), `slot_wait` (waiting for a concurrency slot), and `execute` (your code), plus end-to-end duration.
+- **What failed:** completions by outcome (`success`, `failure`, `timeout`, `canceled`, `dropped`) and `error.type`, enqueue rejections (`queue_full`, `queue_closed`, `canceled`), cancellation requests by reason, event-handler exceptions, and runner crashes.
+- **Capacity:** queue depth and capacity, concurrency in use and limit, backpressure wait, processing state, and last-success timestamp.
+- **Traces:** a `taskhandler enqueue` producer span, a `taskhandler task` consumer span per task with `stage:queued`, `stage:slot_wait`, and `stage:execute` children. Trace context flows from the code that enqueues a task into the task itself, so spans your task creates join the caller's trace.
+
+See [TELEMETRY.md](https://github.com/jchristn/TaskHandler/blob/main/TELEMETRY.md) for the full metric and span catalog, PromQL, alerts, and a dashboard layout.
 
 ## Feedback and Issues
 

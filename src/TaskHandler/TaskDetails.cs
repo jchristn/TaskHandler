@@ -2,6 +2,7 @@
 {
     using System;
     using System.Collections.Generic;
+    using System.Diagnostics;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -114,6 +115,39 @@
         /// Null if task has not started yet.
         /// </summary>
         internal DateTime? StartedAt { get; set; }
+
+        /// <summary>
+        /// Timestamp when the task was read from the queue by the task runner.
+        /// Null if the task has not been dequeued yet.
+        /// </summary>
+        internal DateTime? DequeuedAt { get; set; }
+
+        /// <summary>
+        /// Callback invoked when the task ends canceled or is dropped, so that a result handle is always completed
+        /// even if the task function never ran. Null when not needed.
+        /// </summary>
+        internal Action OnAbandoned { get; set; }
+
+        /// <summary>
+        /// Trace context captured at enqueue time; parent of the task job span.
+        /// Default: default(ActivityContext), meaning no parent.
+        /// </summary>
+        internal ActivityContext ParentContext { get; set; }
+
+        /// <summary>
+        /// Task job span (enqueue to terminal state). Null when no listener is subscribed.
+        /// </summary>
+        internal Activity JobActivity { get; set; }
+
+        /// <summary>
+        /// Slot-wait stage span. Null when no listener is subscribed or once the slot is acquired.
+        /// </summary>
+        internal Activity SlotWaitActivity { get; set; }
+
+        /// <summary>
+        /// Execute stage span. Null when no listener is subscribed or once the task completes.
+        /// </summary>
+        internal Activity ExecuteActivity { get; set; }
 
         #endregion
 

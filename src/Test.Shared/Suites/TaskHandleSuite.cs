@@ -162,6 +162,27 @@ namespace Test.Shared
                         }
                         Check.True(canceled, "handle should surface cancellation");
                     }
+                }),
+
+                TaskHandlerSuites.Case(Id, "HandleCompletesWhenDroppedBeforeStart", "A result task that never starts because the queue stopped completes its handle as canceled", async ct =>
+                {
+                    TaskQueue queue = new TaskQueue(maxConcurrentTasks: 1);
+                    queue.Start();
+
+                    // The holder ignores cancellation so the only slot stays held after Stop().
+                    await queue.EnqueueAsync("holder", async token => await Task.Delay(300));
+                    Check.True(await Check.WaitUntilAsync(() => queue.RunningCount == 1), "holder should start");
+                    TaskHandle<int> handle = await queue.EnqueueAsync<int>("never-runs", token => Task.FromResult(1));
+                    Check.True(await Check.WaitUntilAsync(() => queue.QueuedCount == 0), "result task dequeued and waiting for a slot");
+
+                    queue.Stop();
+
+                    Task completed = await Task.WhenAny(handle.Task, Task.Delay(5000));
+                    Check.True(completed == handle.Task, "handle should complete instead of hanging");
+                    Check.True(handle.Task.IsCanceled, "handle should be canceled");
+
+                    await Task.Delay(400);
+                    queue.Dispose();
                 })
             };
 

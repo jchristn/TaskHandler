@@ -1,6 +1,27 @@
 # Change Log
 
-## v2.1.0 (Current)
+## v2.2.0 (Current)
+
+**Observability:**
+- `TaskQueue` and `TaskRunWithTimeout` emit metrics and traces through the BCL `Meter` and `ActivitySource` named `TaskHandler`, with no exporter or SDK dependency and near-zero cost when unobserved. All names are public constants on `TaskHandlerTelemetryNames`; see `TELEMETRY.md`
+- Metrics: enqueued, rejected (by `error.type`), completed (by outcome and `error.type`), end-to-end and per-stage (`queued`, `slot_wait`, `execute`) duration histograms and stage counters, enqueue/backpressure duration, cancellation requests by reason, lifecycle events, event-handler errors, runner errors, `TaskRunWithTimeout` outcomes and duration, plus observable gauges for queue depth, capacity, concurrency in use and limit, processing state, last success, and build info
+- Traces: `taskhandler enqueue` (producer), `taskhandler task` (consumer, parented to the enqueue span across the background hand-off), `stage:queued`, `stage:slot_wait`, `stage:execute` (current while the task function runs, so user spans nest under it), and `taskhandler run_with_timeout`, all with explicit status and exception events
+- New `TaskQueue.Name` / `TaskQueueOptions.Name` (default `"default"`) labels each queue
+- netstandard targets now reference `System.Diagnostics.DiagnosticSource` 10.0.11; library `LangVersion` raised from 8.0 to 9.0 (compile-time only)
+
+**Fixes:**
+- A result task (`EnqueueAsync<T>`) canceled before its function started, or dropped because the queue stopped while it waited for a concurrency slot, now completes its `TaskHandle<T>` as canceled instead of leaving `handle.Task` pending forever
+- `EnqueueAsync` priority is now assigned before the task is written to the queue (previously set after, racing the runner)
+
+**Testing:**
+- Added an 18-case Telemetry suite (in-memory `MeterListener`/`ActivityListener`) and a regression case for dropped result handles; 136 cases total
+
+## v2.1.1
+
+- Fixed result-returning `EnqueueAsync<T>` overloads so a task exceeding its timeout completes the `TaskHandle<T>` with a `TimeoutException`; `TaskHandle<T>` completion made idempotent
+- Updated `System.Threading.Channels` and `Microsoft.Bcl.AsyncInterfaces` to 10.0.11
+
+## v2.1.0
 
 **Target Framework Update:**
 - Dropped .NET 6.0 target (out of support)

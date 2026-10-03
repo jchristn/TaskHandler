@@ -37,13 +37,13 @@ dotnet build -c Release
 
 ## Architecture
 
-**Current Version:** v2.0.0
+**Current Version:** v2.2.0
 
 The architecture has evolved significantly from v1.0.x:
 - **v1.0.x**: Polling-based with 100ms iteration delay
 - **v2.0.0**: Event-driven with Channels and Semaphores (10-100x performance improvement), includes statistics tracking and progress reporting
 
-This documentation describes the v2.0.0 architecture.
+This documentation describes the v2.x architecture (v2.2.0 adds built-in metrics and traces; see TELEMETRY.md).
 
 ### Core Components
 
@@ -96,6 +96,17 @@ This documentation describes the v2.0.0 architecture.
 - Properties: Current, Total, PercentComplete, Message
 - Used with tasks that accept `IProgress<TaskProgress>` parameter
 
+**TaskHandlerTelemetryNames** (src/TaskHandler/TaskHandlerTelemetryNames.cs)
+- Public constants for the telemetry contract: meter and activity source name (`TaskHandler`), every metric,
+  span, attribute key, and bounded attribute value. Treat as public API; document changes in TELEMETRY.md
+
+**TaskHandlerTelemetry** (src/TaskHandler/TaskHandlerTelemetry.cs)
+- Internal static holder for the BCL `Meter` / `ActivitySource`, all instruments, the weak-reference queue registry
+  backing the observable gauges, and best-effort recording helpers (every helper swallows its own exceptions)
+- Library rule: emit only via BCL APIs; never add an OpenTelemetry SDK, exporter, or Radiant reference
+- Metric labels must be bounded (`taskhandler.queue.name` from `TaskQueue.Name`, outcome, stage, `error.type`, ...);
+  task ids and names go on spans only. Every new code path needs a metric and span plus a TelemetrySuite test
+
 **TaskRunWithTimeout** (src/TaskHandler/TaskRunWithTimeout.cs)
 - Static utility class for running tasks with timeout constraints
 - Generic method: `Task<T> Go<T>(Task<T> task, int timeoutMs, CancellationTokenSource tokenSource)`
@@ -142,7 +153,7 @@ Testing is built on **[Touchstone](https://github.com/jchristn/touchstone)**, a 
 descriptor framework. Test cases are defined once and executed through multiple hosts.
 
 **Test.Shared** (src/Test.Shared) is the single source of truth for the test corpus. It exposes
-`TaskHandlerSuites.All`, a set of `TestSuiteDescriptor` objects containing 110 exhaustive positive and
+`TaskHandlerSuites.All`, a set of `TestSuiteDescriptor` objects containing 136 exhaustive positive and
 negative test cases organized into suites:
 - Construction & configuration (constructors, options, Create factory, validation)
 - Property validation
@@ -158,6 +169,8 @@ negative test cases organized into suites:
 - TaskInfo snapshots
 - TaskProgress and TaskDetails value objects
 - TaskRunWithTimeout
+- Telemetry (metrics and spans for every inventory category and failure path, via the in-memory
+  `TelemetryCapture` helper in src/Test.Shared/Telemetry)
 
 The `Check` helper (src/Test.Shared/Check.cs) provides assertions; a failed assertion throws
 `AssertionException`, which Touchstone reports as a failed test.
