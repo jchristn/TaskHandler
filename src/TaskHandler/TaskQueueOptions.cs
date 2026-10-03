@@ -1,6 +1,7 @@
 namespace TaskHandler
 {
     using System;
+    using QoSKit;
 
     /// <summary>
     /// Configuration options for TaskQueue.
@@ -27,7 +28,8 @@ namespace TaskHandler
         }
 
         /// <summary>
-        /// Maximum queue size. -1 for unbounded.
+        /// Maximum queue size. -1 for unbounded. Must stay -1 when <see cref="Scheduler"/> is set (configure the
+        /// scheduler's MaxDepth instead).
         /// Default: -1 (unbounded). Minimum: -1 or greater than 0.
         /// </summary>
         public int MaxQueueSize
@@ -42,6 +44,16 @@ namespace TaskHandler
                 _MaxQueueSize = value;
             }
         }
+
+        /// <summary>
+        /// Optional QoSKit queue that decides which waiting task starts next, for example
+        /// <c>new PriorityQoSQueue&lt;TaskDetails&gt;(5, t =&gt; t.Priority)</c> for strict priority or a
+        /// WeightedFairQoSQueue keyed on task metadata for per-tenant fairness. Null (the default) starts tasks in the
+        /// order they were added (FIFO). The TaskQueue takes ownership of it; see
+        /// <see cref="TaskQueue(QoSKit.IQoSQueue{TaskDetails}, int)"/> for the rules.
+        /// Default: null.
+        /// </summary>
+        public IQoSQueue<TaskDetails> Scheduler { get; set; } = null;
 
         /// <summary>
         /// Queue name, reported as the taskhandler.queue.name label on every TaskHandler metric and span.

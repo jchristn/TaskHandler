@@ -81,8 +81,8 @@ Prometheus names assume the standard OpenTelemetry Prometheus exporter, which co
 | Instrument | Type | Unit | Labels | Prometheus series | Description |
 |---|---|---|---|---|---|
 | `taskhandler.task.enqueued` | Counter | `{task}` | `taskhandler.queue.name` | `taskhandler_task_enqueued_total` | Tasks accepted into the queue. |
-| `taskhandler.task.rejected` | Counter | `{task}` | `taskhandler.queue.name`, `error.type` | `taskhandler_task_rejected_total` | Enqueue attempts rejected. `error.type` is `queue_full` (bounded queue full on `AddTask`), `queue_closed` (the queue was disposed), `canceled` (caller token canceled while waiting for space), or an exception type. |
-| `taskhandler.task.completed` | Counter | `{task}` | `taskhandler.queue.name`, `taskhandler.outcome`, `error.type`* | `taskhandler_task_completed_total` | Tasks that reached a terminal state. Outcome is `success`, `failure`, `timeout`, `canceled`, or `dropped`. *`error.type` is present for `failure`, `timeout`, and `dropped` only (`dropped` always carries `queue_closed`). |
+| `taskhandler.task.rejected` | Counter | `{task}` | `taskhandler.queue.name`, `error.type` | `taskhandler_task_rejected_total` | Enqueue attempts rejected. `error.type` is `queue_full` (bounded queue full on `AddTask`, or a QoSKit scheduler full under `Reject`/`DropNewest`), `queue_closed` (the queue was disposed), `unclassified` (a QoSKit scheduler could not classify the task), `canceled` (caller token canceled while waiting for space), or an exception type. |
+| `taskhandler.task.completed` | Counter | `{task}` | `taskhandler.queue.name`, `taskhandler.outcome`, `error.type`* | `taskhandler_task_completed_total` | Tasks that reached a terminal state. Outcome is `success`, `failure`, `timeout`, `canceled`, or `dropped`. *`error.type` is present for `failure`, `timeout`, and `dropped` only (`dropped` carries `queue_closed` when the queue was disposed, or `queue_full` when a QoSKit `DropOldest` scheduler evicted the task). |
 | `taskhandler.task.duration` | Histogram | `s` | `taskhandler.queue.name`, `taskhandler.outcome` | `taskhandler_task_duration_seconds_*` | End-to-end time from enqueue to terminal state. |
 | `taskhandler.task.last_success` | Observable gauge | `s` | `taskhandler.queue.name` | `taskhandler_task_last_success_seconds` | Unix time of the most recent successful completion. Absent until the first success. |
 
@@ -156,7 +156,7 @@ Canceled spans are left `Unset` deliberately: cancellation is usually intentiona
 | `taskhandler.lifecycle.event` | yes | no | `start`, `stop`, `dispose` |
 | `taskhandler.event` | yes | no | Event handler property names, such as `OnTaskFinished` |
 | `taskhandler.version` | build info only | no | Library version |
-| `error.type` | yes | yes | Exception full type name, or `queue_full`, `queue_closed`, `canceled` |
+| `error.type` | yes | yes | Exception full type name, or `queue_full`, `queue_closed`, `unclassified`, `canceled` |
 | `taskhandler.task.id` | **never** | yes | Task GUID |
 | `taskhandler.task.name` | **never** | yes | User-supplied task name |
 | `taskhandler.task.priority` | no | yes | Integer priority |
@@ -243,7 +243,8 @@ TaskHandler has no logging dependency. Its existing `Logger` callback (`Action<s
 
 - **Best effort:** every recording path catches its own exceptions. Telemetry can never fail, delay, or alter a task.
 - **Observable gauges** are backed by a registry of weak references to live queues. A disposed queue stops reporting, and a queue that is garbage-collected without `Dispose()` is pruned automatically.
+- **Stages with a QoSKit scheduler.** The default FIFO queue reads the next task and then waits for a slot, so `stage:queued` and `stage:slot_wait` are distinct. With a scheduler, the runner waits for a free slot first and then asks the scheduler, so a later high-priority task can overtake waiting work. Wait time therefore lands in `stage:queued`, and `stage:slot_wait` is near zero. `taskhandler.queue.depth` and `taskhandler.queue.capacity` report the scheduler's waiting tasks and `MaxDepth`. QoSKit also emits its own scheduler telemetry under the meter and activity source `QoSKit`, which hosts can subscribe to separately.
 - **`Stop()` does not drop tasks.** Tasks that have not started (including one already waiting for a slot) are retained and run after the next `Start()`, so they stay in `taskhandler.queue.depth`. Their `stage:queued` time includes the pause. The one task that had already reached `stage:slot_wait` keeps its `taskhandler task` and `stage:slot_wait` spans open while stopped, so its slot-wait duration includes the pause.
-- **`dropped` means disposed.** `Dispose()` completes every unstarted task with outcome `dropped` and `error.type` `queue_closed`, from whichever stage it was in. A task that was never read from the queue still gets a `taskhandler task` span, back-dated to its enqueue time, with `Error` status.
+- **`dropped` means disposed or evicted.** `Dispose()` completes every unstarted task with outcome `dropped` and `error.type` `queue_closed`, from whichever stage it was in. A QoSKit scheduler with the `DropOldest` policy evicts its oldest waiting task as `dropped` with `error.type` `queue_full` (from the `queued` stage). A task that was never read from the queue still gets a `taskhandler task` span, back-dated to its enqueue time, with `Error` status.
 - **`timeout` detection** classifies any task that ends with `TimeoutException` (including one thrown by user code) as `timeout`.
 - **Percentiles** come from histogram buckets in Prometheus/Grafana. TaskHandler never computes quantiles in process.

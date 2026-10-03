@@ -54,6 +54,7 @@ TaskHandler is a simple, lightweight C# library for managing asynchronous task q
   - [Options Pattern - Fluent Configuration](#options-pattern---fluent-configuration)
   - [Per-Task Timeout Support](#per-task-timeout-support)
   - [Task Priority](#task-priority)
+  - [Scheduling: FIFO by Default, QoSKit for Priority and Fairness](#scheduling-fifo-by-default-qoskit-for-priority-and-fairness)
   - [GetRunningTasksInfo() - Immutable Task Information](#getrunningtasksinfo---immutable-task-information)
   - [Combined Example - Advanced Features](#combined-example---advanced-features)
 - [Statistics and Progress Reporting](#statistics-and-progress-reporting)
@@ -462,15 +463,18 @@ using (CancellationTokenSource cts = new CancellationTokenSource())
 #### Constructors
 ```csharp
 TaskQueue(int maxConcurrentTasks = 32, int maxQueueSize = -1)
+TaskQueue(IQoSQueue<TaskDetails> scheduler, int maxConcurrentTasks = 32)
+TaskQueue(TaskQueueOptions options)
 ```
-Creates a new task queue with the specified maximum concurrent task limit and optional queue size limit.
+The first creates a FIFO queue with a concurrency limit and optional queue size limit. The second hands start order (and capacity) to a [QoSKit](https://github.com/jchristn/QoSKit) queue; see [Scheduling](#scheduling-fifo-by-default-qoskit-for-priority-and-fairness). The third takes either form through `TaskQueueOptions` (`Scheduler` and `MaxQueueSize` cannot both be set).
 
 #### Properties
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `MaxConcurrentTasks` | `int` | Maximum number of tasks that can run concurrently. Minimum: 1, Default: 32 |
-| `MaxQueueSize` | `int` | Maximum queue size. -1 for unbounded (default). Prevents memory exhaustion when tasks arrive faster than they can be processed |
+| `MaxConcurrentTasks` | `int` | Maximum number of tasks that can run concurrently. Minimum: 1, Default: 32. Can be changed at any time: raising it starts waiting tasks immediately; lowering it never interrupts running tasks and applies as they finish |
+| `MaxQueueSize` | `int` | Maximum number of tasks waiting to start. -1 for unbounded (default). Can only be changed before the queue is first started or given a task (a later change throws `InvalidOperationException`). With a scheduler, reports the scheduler's `MaxDepth` and cannot be set |
+| `Scheduler` | `IQoSQueue<TaskDetails>` | The QoSKit queue deciding start order, or `null` for FIFO (read-only; for inspection only) |
 | `RunningCount` | `int` | Number of currently running tasks (read-only) |
 | `QueuedCount` | `int` | Number of tasks accepted but not yet started, including tasks waiting for a concurrency slot and tasks held while the queue is stopped (read-only) |
 | `RunningTasks` | `ConcurrentDictionary<Guid, TaskDetails>` | Dictionary of currently running tasks (read-only) |
@@ -1290,11 +1294,11 @@ This ensures compatibility with:
 - Xamarin
 - Unity (2021.2+)
 
-Dependencies: `System.Threading.Channels` and `System.Diagnostics.DiagnosticSource` on the netstandard targets (plus `Microsoft.Bcl.AsyncInterfaces` on netstandard2.0). The net8.0 and net10.0 builds have no package dependencies.
+Dependencies: [`QoSKit`](https://www.nuget.org/packages/QoSKit) on every target (used only when you pass a scheduler; the default FIFO path does not touch it), plus `System.Threading.Channels` and `System.Diagnostics.DiagnosticSource` on the netstandard targets (and `Microsoft.Bcl.AsyncInterfaces` on netstandard2.0).
 
 ## Testing
 
-Tests are defined once in `src/Test.Shared` using [Touchstone](https://github.com/jchristn/touchstone) and executed by three runners. The corpus contains 153 positive and negative cases covering construction and validation, enqueue and execution, concurrency control, cancellation, lifecycle (including stop/restart retention, adding while stopped, and dispose drops), events, `TaskHandle<T>`, statistics, progress, priority, `TaskInfo`, `TaskRunWithTimeout`, and telemetry (every metric and span family, including failure, timeout, cancellation, rejection, drop, and no-listener paths).
+Tests are defined once in `src/Test.Shared` using [Touchstone](https://github.com/jchristn/touchstone) and executed by three runners. The corpus contains 172 positive and negative cases covering construction and validation, enqueue and execution, concurrency control, cancellation, lifecycle (including stop/restart retention, adding while stopped, and dispose drops), events, `TaskHandle<T>`, FIFO and QoSKit scheduling (priority order, overtaking a backlog, weighted fairness, capacity policies, eviction, unclassified rejection), runtime `MaxConcurrentTasks` and `MaxQueueSize` changes, statistics, progress, priority, `TaskInfo`, `TaskRunWithTimeout`, and telemetry (every metric and span family, including failure, timeout, cancellation, rejection, drop, and no-listener paths).
 
 ```bash
 cd src/Test.Automated && dotnet run          # Touchstone CLI runner
@@ -1396,6 +1400,50 @@ var queue2 = TaskQueue.Create(options =>
 queue.Start();
 ```
 
+### Scheduling: FIFO by Default, QoSKit for Priority and Fairness
+
+By default a `TaskQueue` starts tasks in the order they were added (FIFO), backed by a `System.Threading.Channels` channel. When you need something smarter, pass a [QoSKit](https://github.com/jchristn/QoSKit) queue of `TaskDetails` as the scheduler. Whenever a concurrency slot frees up, the TaskQueue asks the scheduler which waiting task starts next. Everything else (concurrency limit, events, handles, stop/restart/dispose, statistics, telemetry) works the same.
+
+**Strict priority** (lower `Priority` first, FIFO within a priority; out-of-range values are clamped to the nearest band):
+
+```csharp
+using QoSKit;
+using TaskHandler;
+
+TaskQueue queue = new TaskQueue(
+    new PriorityQoSQueue<TaskDetails>(levels: 5, prioritySelector: t => t.Priority)
+        .WithAging(30000),   // optional: promote tasks waiting longer than 30s so low priorities cannot starve
+    maxConcurrentTasks: 4);
+
+queue.Start();
+await queue.EnqueueAsync("report", async token => await BuildReport(token), priority: (int)TaskPriority.Background);
+await queue.EnqueueAsync("checkout", async token => await Charge(token), priority: (int)TaskPriority.Urgent);
+// "checkout" starts before any waiting Background task.
+```
+
+**Weighted fairness per tenant** (heavier flows get proportionally more starts; keys come from task metadata):
+
+```csharp
+TaskQueue queue = TaskQueue.Create(o =>
+{
+    o.MaxConcurrentTasks = 8;
+    o.Scheduler = new WeightedFairQoSQueue<TaskDetails>(
+        flowSelector: t => (string)t.Metadata["tenant"],
+        flows: new[] { new WeightedFlow("gold", 5), new WeightedFlow("silver", 3), new WeightedFlow("bronze", 1) });
+});
+
+queue.AddTask(Guid.NewGuid(), "export", new Dictionary<string, object> { { "tenant", "gold" } }, ExportAsync);
+```
+
+Any QoSKit discipline works (`ClassBasedWeightedFairQoSQueue`, `LowLatencyQoSQueue`, `WeightedRoundRobinQoSQueue`, ...). Rules:
+
+- **Capacity comes from the scheduler.** Use its `MaxDepth` and `OverflowPolicy` instead of `MaxQueueSize` (setting both throws). `Reject` and `DropNewest` make `AddTask`/`AddTaskAsync` throw `InvalidOperationException` when full. `Block` makes `AddTaskAsync` wait for space (even while stopped). `DropOldest` evicts the oldest waiting task, which completes as canceled: handle canceled, `OnTaskCanceled` fired, counted in `TotalCanceled`, telemetry outcome `dropped`.
+- **Unclassifiable tasks are rejected.** If the scheduler cannot classify a task (for example an unknown tenant under `UnknownKeyPolicy.Reject`), the add throws `InvalidOperationException` and the rejection is recorded with `error.type` `unclassified`.
+- **The TaskQueue owns the scheduler.** It must be empty when passed in. The TaskQueue disposes it, and it must not be shared, written to directly, or given QoSKit persistence (tasks hold delegates and cannot be persisted). Read `queue.Scheduler` for inspection only.
+- **Default priority is 0 (`Urgent`).** `AddTask` and `EnqueueAsync` without a priority produce `Priority = 0`. With a priority scheduler, pass explicit priorities, or map the default in your selector.
+- **Stop and dispose behave as for FIFO.** `Stop()` retains waiting tasks (and the scheduler orders them on restart), `Stop(guid)` cancels a waiting task, and `Dispose()` drops every waiting task as canceled.
+- **QoSKit's own telemetry** (meter and activity source `QoSKit`) describes the scheduler itself. It is independent of TaskHandler's and can be subscribed to separately.
+
 ### Per-Task Timeout Support
 
 Set timeouts for individual tasks:
@@ -1445,7 +1493,7 @@ catch (TimeoutException ex)
 
 Assign priorities to tasks (lower number = higher priority).
 
-> **Note:** priority is recorded on the task (`TaskDetails.Priority`, `TaskInfo.Priority`, and the `taskhandler.task.priority` span attribute) for your own use, but it does not change execution order. Tasks start in the order they were added. If you need urgent work to bypass a backlog, use a separate `TaskQueue` for it.
+> **Note:** by default, priority is recorded on the task (`TaskDetails.Priority`, `TaskInfo.Priority`, and the `taskhandler.task.priority` span attribute) but does not change execution order: tasks start in the order they were added. To start lower priority values first, give the queue a QoSKit `PriorityQoSQueue` scheduler, as shown in [Scheduling](#scheduling-fifo-by-default-qoskit-for-priority-and-fairness).
 
 ```csharp
 using TaskHandler;

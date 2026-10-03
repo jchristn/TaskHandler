@@ -8,9 +8,12 @@ namespace TaskHandler
     using System.Threading;
     using System.Threading.Channels;
     using System.Threading.Tasks;
+    using QoSKit;
 
     /// <summary>
     /// Task queue.
+    /// By default tasks start in the order they were added (FIFO). To start them by priority, weighted fairness, or
+    /// another discipline, construct the queue with a QoSKit scheduler (see <see cref="Scheduler"/>).
     /// Emits metrics and traces through the BCL Meter and ActivitySource named "TaskHandler"
     /// (see <see cref="TaskHandlerTelemetryNames"/> and TELEMETRY.md). Emission is best-effort, never throws,
     /// and costs effectively nothing when no listener is subscribed.
@@ -27,8 +30,11 @@ namespace TaskHandler
 
         /// <summary>
         /// Maximum number of concurrent tasks.
+        /// Can be changed at any time. Raising it lets waiting tasks start immediately; lowering it never interrupts
+        /// running tasks, and takes full effect as they finish.
         /// Default: 32. Minimum: 1.
         /// </summary>
+        /// <exception cref="ArgumentOutOfRangeException">Thrown when set below 1.</exception>
         public int MaxConcurrentTasks
         {
             get
@@ -38,24 +44,84 @@ namespace TaskHandler
             set
             {
                 if (value < 1) throw new ArgumentOutOfRangeException(nameof(MaxConcurrentTasks));
-                _MaxConcurrentTasks = value;
+
+                lock (_StateLock)
+                {
+                    int delta = value - _MaxConcurrentTasks;
+                    _MaxConcurrentTasks = value;
+                    if (_concurrencySemaphore == null || delta == 0) return;
+
+                    if (delta > 0)
+                    {
+                        // Cancel outstanding withheld slots first, then release the rest.
+                        int remaining = delta;
+                        while (remaining > 0)
+                        {
+                            int debt = Volatile.Read(ref _SlotDebt);
+                            if (debt <= 0) break;
+                            int pay = Math.Min(debt, remaining);
+                            if (Interlocked.CompareExchange(ref _SlotDebt, debt - pay, debt) == debt) remaining -= pay;
+                        }
+
+                        if (remaining > 0) _concurrencySemaphore.Release(remaining);
+                    }
+                    else
+                    {
+                        // Take free slots now; withhold the rest as running tasks release them (see ReleaseSlot), so a
+                        // freed slot can never reach a waiting task first.
+                        int needed = -delta;
+                        while (needed > 0 && _concurrencySemaphore.Wait(0)) needed--;
+                        if (needed > 0) Interlocked.Add(ref _SlotDebt, needed);
+                    }
+                }
             }
         }
 
         /// <summary>
-        /// Maximum queue size. -1 for unbounded.
-        /// Default: -1 (unbounded)
+        /// Maximum number of tasks that can wait to start. -1 for unbounded.
+        /// Can only be changed before the queue is first started or given a task; afterwards a different value
+        /// throws, because the existing queue cannot be resized. When the queue was created with a
+        /// <see cref="Scheduler"/>, this reports the scheduler's MaxDepth (-1 when unbounded) and cannot be set.
+        /// Default: -1 (unbounded).
         /// </summary>
+        /// <exception cref="ArgumentOutOfRangeException">Thrown when set to 0 or below -1.</exception>
+        /// <exception cref="InvalidOperationException">Thrown when changed after the queue was started or given a
+        /// task, or when the queue uses a <see cref="Scheduler"/>.</exception>
         public int MaxQueueSize
         {
             get
             {
-                return _MaxQueueSize;
+                return _Buffer != null ? _Buffer.Capacity : -1;
             }
             set
             {
                 if (value < -1 || value == 0) throw new ArgumentOutOfRangeException(nameof(MaxQueueSize), "MaxQueueSize must be -1 (unbounded) or greater than 0");
-                _MaxQueueSize = value;
+
+                lock (_StateLock)
+                {
+                    if (_Buffer is QoSTaskBuffer)
+                        throw new InvalidOperationException("MaxQueueSize cannot be set on a queue that uses a QoSKit scheduler; configure the scheduler's MaxDepth and OverflowPolicy instead.");
+                    if (_Buffer != null && _Buffer.Capacity == value) return;
+                    if (_InUse)
+                        throw new InvalidOperationException("MaxQueueSize can only be changed before the queue is first started or given a task.");
+
+                    _Buffer = new ChannelTaskBuffer(value);
+                }
+            }
+        }
+
+        /// <summary>
+        /// The QoSKit queue that decides which waiting task starts next, or null when the queue uses the default FIFO
+        /// order. Set through the <see cref="TaskQueue(IQoSQueue{TaskDetails}, int)"/> constructor or
+        /// <see cref="TaskQueueOptions.Scheduler"/>; the TaskQueue owns it and disposes it. Use it for inspection
+        /// (Count, Statistics) only: enqueuing or dequeuing on it directly bypasses the TaskQueue.
+        /// </summary>
+        public IQoSQueue<TaskDetails> Scheduler
+        {
+            get
+            {
+                QoSTaskBuffer qos = _Buffer as QoSTaskBuffer;
+                return qos != null ? qos.Queue : null;
             }
         }
 
@@ -201,9 +267,10 @@ namespace TaskHandler
         private string _Header = "[TaskHandler] ";
         private string _Name = "default";
         private int _MaxConcurrentTasks = 32;
-        private int _MaxQueueSize = -1;
         private ConcurrentDictionary<Guid, TaskDetails> _RunningTasks = new ConcurrentDictionary<Guid, TaskDetails>();
-        private Channel<TaskDetails> _queueChannel;
+        private TaskBuffer _Buffer = null;
+        private bool _InUse = false;
+        private int _SlotDebt = 0;
         private SemaphoreSlim _concurrencySemaphore;
         private int _queuedCount = 0;
         private ConcurrentDictionary<Guid, TaskDetails> _PendingTasks = new ConcurrentDictionary<Guid, TaskDetails>();
@@ -238,49 +305,63 @@ namespace TaskHandler
         #region Constructors-and-Factories
 
         /// <summary>
-        /// Instantiate.
+        /// Instantiate a queue that starts tasks in the order they were added (FIFO).
         /// </summary>
         /// <param name="maxConcurrentTasks">Maximum concurrent tasks. Default: 32. Minimum: 1.</param>
         /// <param name="maxQueueSize">Maximum queue size. -1 for unbounded. Default: -1.</param>
+        /// <exception cref="ArgumentOutOfRangeException">Thrown when maxConcurrentTasks is below 1, or maxQueueSize
+        /// is 0 or below -1.</exception>
         public TaskQueue(int maxConcurrentTasks = 32, int maxQueueSize = -1)
         {
-            _TaskRunnerToken = _TaskRunnerTokenSource.Token;
+            if (maxQueueSize < -1 || maxQueueSize == 0) throw new ArgumentOutOfRangeException(nameof(maxQueueSize), "MaxQueueSize must be -1 (unbounded) or greater than 0");
+            Initialize(maxConcurrentTasks, new ChannelTaskBuffer(maxQueueSize));
+        }
 
-            MaxConcurrentTasks = maxConcurrentTasks;
-            MaxQueueSize = maxQueueSize;
-
-            // The channel lives as long as the queue: Stop() leaves it open so queued tasks are retained and new tasks
-            // can still be added, and only Dispose() completes it. SingleReader is false because Dispose() drains it
-            // while a stopping runner may still be reading.
-            if (maxQueueSize > 0)
-            {
-                _queueChannel = Channel.CreateBounded<TaskDetails>(new BoundedChannelOptions(maxQueueSize)
-                {
-                    SingleReader = false,
-                    SingleWriter = false,
-                    FullMode = BoundedChannelFullMode.Wait
-                });
-            }
-            else
-            {
-                _queueChannel = Channel.CreateUnbounded<TaskDetails>(new UnboundedChannelOptions
-                {
-                    SingleReader = false,
-                    SingleWriter = false
-                });
-            }
-
-            _concurrencySemaphore = new SemaphoreSlim(maxConcurrentTasks, maxConcurrentTasks);
-            _TelemetryId = TaskHandlerTelemetry.RegisterQueue(this);
+        /// <summary>
+        /// Instantiate a queue whose start order is decided by a QoSKit scheduler, for example
+        /// <c>new PriorityQoSQueue&lt;TaskDetails&gt;(5, t =&gt; t.Priority)</c> to start lower
+        /// <see cref="TaskDetails.Priority"/> values first.
+        /// The scheduler's MaxDepth and OverflowPolicy replace MaxQueueSize: Reject and DropNewest reject new tasks when
+        /// full, Block makes asynchronous adds wait for space, and DropOldest evicts the oldest waiting task (which
+        /// completes as canceled, like a task dropped by Dispose). The TaskQueue takes ownership of the scheduler and
+        /// disposes it; do not share it, enqueue to it directly, or enable QoSKit persistence on it.
+        /// </summary>
+        /// <param name="scheduler">QoSKit queue of TaskDetails. Must not be null, and must be empty.</param>
+        /// <param name="maxConcurrentTasks">Maximum concurrent tasks. Default: 32. Minimum: 1.</param>
+        /// <exception cref="ArgumentNullException">Thrown when scheduler is null.</exception>
+        /// <exception cref="ArgumentException">Thrown when scheduler already holds items.</exception>
+        /// <exception cref="ArgumentOutOfRangeException">Thrown when maxConcurrentTasks is below 1.</exception>
+        public TaskQueue(IQoSQueue<TaskDetails> scheduler, int maxConcurrentTasks = 32)
+        {
+            if (scheduler == null) throw new ArgumentNullException(nameof(scheduler));
+            if (scheduler.Count != 0) throw new ArgumentException("The scheduler must be empty when given to a TaskQueue.", nameof(scheduler));
+            Initialize(maxConcurrentTasks, new QoSTaskBuffer(scheduler, HandleSchedulerDropped));
         }
 
         /// <summary>
         /// Instantiate with options.
         /// </summary>
         /// <param name="options">TaskQueue options.</param>
+        /// <exception cref="ArgumentNullException">Thrown when options is null.</exception>
+        /// <exception cref="ArgumentException">Thrown when options sets both a Scheduler and a MaxQueueSize, or the
+        /// Scheduler already holds items.</exception>
         public TaskQueue(TaskQueueOptions options)
-            : this(options.MaxConcurrentTasks, options.MaxQueueSize)
         {
+            if (options == null) throw new ArgumentNullException(nameof(options));
+
+            if (options.Scheduler != null)
+            {
+                if (options.MaxQueueSize != -1)
+                    throw new ArgumentException("Set either Scheduler or MaxQueueSize, not both; configure the scheduler's MaxDepth instead.", nameof(options));
+                if (options.Scheduler.Count != 0)
+                    throw new ArgumentException("The scheduler must be empty when given to a TaskQueue.", nameof(options));
+                Initialize(options.MaxConcurrentTasks, new QoSTaskBuffer(options.Scheduler, HandleSchedulerDropped));
+            }
+            else
+            {
+                Initialize(options.MaxConcurrentTasks, new ChannelTaskBuffer(options.MaxQueueSize));
+            }
+
             Name = options.Name;
             Logger = options.Logger;
             OnTaskAdded = options.OnTaskAdded;
@@ -330,9 +411,7 @@ namespace TaskHandler
                 Logger?.Invoke(_Header + "disposing");
                 TaskHandlerTelemetry.Lifecycle(_Name, TaskHandlerTelemetryNames.LifecycleDispose);
 
-                // Reject further writes, then stop the runner before canceling tasks so it cannot start another.
-                _queueChannel.Writer.TryComplete();
-
+                // Stop the runner before canceling tasks so it cannot start another.
                 if (!_TaskRunnerTokenSource.IsCancellationRequested)
                 {
                     _TaskRunnerTokenSource.Cancel();
@@ -349,21 +428,17 @@ namespace TaskHandler
                     task.Value.TokenSource.Cancel();
                 }
 
+                // Reject further writes (releasing any add waiting for space) and collect everything not started.
+                List<TaskDetails> unstarted = _Buffer.Close();
                 if (_HeldTask != null)
                 {
-                    dropped.Add(_HeldTask);
+                    unstarted.Insert(0, _HeldTask);
                     _HeldTask = null;
                 }
 
-                while (_queueChannel.Reader.TryRead(out TaskDetails queued))
+                foreach (TaskDetails task in unstarted)
                 {
-                    dropped.Add(queued);
-                }
-
-                foreach (TaskDetails task in dropped)
-                {
-                    Interlocked.Decrement(ref _queuedCount);
-                    RemovePending(task);
+                    if (TryLeaveQueue(task)) dropped.Add(task);
                 }
 
                 // The semaphore is intentionally not disposed: SemaphoreSlim.Dispose() discards pending async waiters,
@@ -376,7 +451,7 @@ namespace TaskHandler
 
             foreach (TaskDetails task in dropped)
             {
-                CompleteDropped(task);
+                CompleteDropped(task, TaskHandlerTelemetryNames.ErrorQueueClosed);
             }
 
             if (wasStarted) SafeInvokeEvent(OnProcessingStopped, nameof(OnProcessingStopped), EventArgs.Empty);
@@ -437,22 +512,17 @@ namespace TaskHandler
             TaskHandlerTelemetry.CaptureParentContext(details, enqueueActivity);
 
             // Count the task before it becomes visible to the runner so QueuedCount never goes negative.
+            _InUse = true;
             Interlocked.Increment(ref _queuedCount);
             _PendingTasks[details.Guid] = details;
 
-            if (!_queueChannel.Writer.TryWrite(details))
+            string rejection = _Buffer.TryWrite(details);
+            if (rejection != null)
             {
-                Interlocked.Decrement(ref _queuedCount);
-                RemovePending(details);
-
-                if (_IsDisposed)
-                {
-                    TaskHandlerTelemetry.EnqueueRejected(_Name, enqueueActivity, enqueueStarted, TaskHandlerTelemetryNames.ErrorQueueClosed, null);
-                    throw new ObjectDisposedException(nameof(TaskQueue));
-                }
-
-                TaskHandlerTelemetry.EnqueueRejected(_Name, enqueueActivity, enqueueStarted, TaskHandlerTelemetryNames.ErrorQueueFull, null);
-                throw new InvalidOperationException("Failed to enqueue task '" + name + "': the queue is full (MaxQueueSize " + _MaxQueueSize + ").");
+                TryLeaveQueue(details);
+                if (_IsDisposed) rejection = TaskHandlerTelemetryNames.ErrorQueueClosed;
+                TaskHandlerTelemetry.EnqueueRejected(_Name, enqueueActivity, enqueueStarted, rejection, null);
+                ThrowRejected(name, rejection);
             }
 
             Interlocked.Increment(ref _TotalEnqueued);
@@ -804,6 +874,7 @@ namespace TaskHandler
 
                 Logger?.Invoke(_Header + "starting");
                 _IsStarted = true;
+                _InUse = true;
 
                 // Recreate cancellation token source if it was canceled
                 if (_TaskRunnerTokenSource.IsCancellationRequested)
@@ -969,6 +1040,58 @@ namespace TaskHandler
 
         #region Private-Methods
 
+        private void Initialize(int maxConcurrentTasks, TaskBuffer buffer)
+        {
+            if (maxConcurrentTasks < 1) throw new ArgumentOutOfRangeException(nameof(maxConcurrentTasks));
+
+            _TaskRunnerToken = _TaskRunnerTokenSource.Token;
+            _MaxConcurrentTasks = maxConcurrentTasks;
+
+            // The buffer lives as long as the queue: Stop() leaves it open so queued tasks are retained and new tasks
+            // can still be added, and only Dispose() closes it. The semaphore's maximum is unbounded so
+            // MaxConcurrentTasks can be raised later.
+            _Buffer = buffer;
+            _concurrencySemaphore = new SemaphoreSlim(maxConcurrentTasks, Int32.MaxValue);
+            _TelemetryId = TaskHandlerTelemetry.RegisterQueue(this);
+        }
+
+        private void HandleSchedulerDropped(TaskDetails taskDetails, string errorType)
+        {
+            // The scheduler evicted an accepted task to admit a newer one (DropOldest).
+            if (!TryLeaveQueue(taskDetails)) return;
+            CompleteDropped(taskDetails, errorType);
+        }
+
+        private void ReleaseSlot()
+        {
+            // Absorb the slot instead when MaxConcurrentTasks was lowered below the number of slots in use.
+            while (true)
+            {
+                int debt = Volatile.Read(ref _SlotDebt);
+                if (debt <= 0) break;
+                if (Interlocked.CompareExchange(ref _SlotDebt, debt - 1, debt) == debt) return;
+            }
+
+            _concurrencySemaphore.Release();
+        }
+
+        private void ThrowRejected(string name, string rejection)
+        {
+            if (rejection == TaskHandlerTelemetryNames.ErrorQueueClosed) throw new ObjectDisposedException(nameof(TaskQueue));
+            if (rejection == TaskHandlerTelemetryNames.ErrorUnclassified)
+                throw new InvalidOperationException("Failed to enqueue task '" + name + "': the scheduler could not classify it.");
+            throw new InvalidOperationException("Failed to enqueue task '" + name + "': the queue is full (capacity " + MaxQueueSize + ").");
+        }
+
+        private bool TryLeaveQueue(TaskDetails taskDetails)
+        {
+            // Exactly one path settles a queued task: starting it, canceling it before start, or dropping it.
+            if (!taskDetails.TryClaim()) return false;
+            Interlocked.Decrement(ref _queuedCount);
+            RemovePending(taskDetails);
+            return true;
+        }
+
         private async Task<TaskDetails> AddTaskInternalAsync(
             Guid guid,
             string name,
@@ -996,20 +1119,28 @@ namespace TaskHandler
             TaskHandlerTelemetry.CaptureParentContext(details, enqueueActivity);
 
             // Count the task before it becomes visible to the runner so QueuedCount never goes negative.
+            _InUse = true;
             Interlocked.Increment(ref _queuedCount);
             _PendingTasks[details.Guid] = details;
 
+            string rejection;
             try
             {
-                await _queueChannel.Writer.WriteAsync(details, cancellationToken).ConfigureAwait(false);
+                rejection = await _Buffer.WriteAsync(details, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                Interlocked.Decrement(ref _queuedCount);
-                RemovePending(details);
+                TryLeaveQueue(details);
                 TaskHandlerTelemetry.EnqueueRejected(_Name, enqueueActivity, enqueueStarted, TaskHandlerTelemetry.EnqueueErrorType(ex), ex);
                 if (ex is ChannelClosedException) throw new ObjectDisposedException(nameof(TaskQueue));
                 throw;
+            }
+
+            if (rejection != null)
+            {
+                TryLeaveQueue(details);
+                TaskHandlerTelemetry.EnqueueRejected(_Name, enqueueActivity, enqueueStarted, rejection, null);
+                ThrowRejected(name, rejection);
             }
 
             Interlocked.Increment(ref _TotalEnqueued);
@@ -1085,23 +1216,39 @@ namespace TaskHandler
                 TaskDetails held = TakeHeldTask();
                 if (held != null)
                 {
-                    await DispatchAsync(held, token, true).ConfigureAwait(false);
+                    await DispatchAsync(held, token, true, false).ConfigureAwait(false);
                 }
 
-#if NETSTANDARD2_0
-                while (await _queueChannel.Reader.WaitToReadAsync(token).ConfigureAwait(false))
+                // A QoSKit scheduler is asked for the next task only once a slot is free, so a task added while all
+                // slots are busy can still overtake lower-priority work. The default FIFO order is unaffected by
+                // reading ahead, so it reads first and then waits for a slot (keeping the queued and slot_wait stages
+                // distinct).
+                bool slotFirst = _Buffer is QoSTaskBuffer;
+                while (true)
                 {
-                    while (!token.IsCancellationRequested && _queueChannel.Reader.TryRead(out TaskDetails taskDetails))
+                    if (slotFirst)
                     {
-                        await DispatchAsync(taskDetails, token, false).ConfigureAwait(false);
+                        await _concurrencySemaphore.WaitAsync(token).ConfigureAwait(false);
+
+                        TaskDetails next;
+                        try
+                        {
+                            next = await _Buffer.ReadAsync(token).ConfigureAwait(false);
+                        }
+                        catch (Exception)
+                        {
+                            ReleaseSlot();
+                            throw;
+                        }
+
+                        await DispatchAsync(next, token, false, true).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        TaskDetails next = await _Buffer.ReadAsync(token).ConfigureAwait(false);
+                        await DispatchAsync(next, token, false, false).ConfigureAwait(false);
                     }
                 }
-#else
-                await foreach (TaskDetails taskDetails in _queueChannel.Reader.ReadAllAsync(token).ConfigureAwait(false))
-                {
-                    await DispatchAsync(taskDetails, token, false).ConfigureAwait(false);
-                }
-#endif
             }
             catch (OperationCanceledException)
             {
@@ -1135,7 +1282,7 @@ namespace TaskHandler
             Logger?.Invoke(_Header + "task runner exiting");
         }
 
-        private async Task DispatchAsync(TaskDetails taskDetails, CancellationToken token, bool resumed)
+        private async Task DispatchAsync(TaskDetails taskDetails, CancellationToken token, bool resumed, bool slotHeld)
         {
             if (!resumed)
             {
@@ -1146,20 +1293,24 @@ namespace TaskHandler
             // A task canceled with Stop(guid) while it waited never runs and does not need a slot.
             if (taskDetails.Token.IsCancellationRequested)
             {
+                if (slotHeld) ReleaseSlot();
                 CompleteCanceledBeforeStart(taskDetails);
                 return;
             }
 
-            // Wait for available slot. If the queue stops first, hold the task for the next Start(); if it is
-            // disposed, drop it.
-            try
+            // Wait for available slot unless the runner already holds one. If the queue stops first, hold the task
+            // for the next Start(); if it is disposed, drop it.
+            if (!slotHeld)
             {
-                await _concurrencySemaphore.WaitAsync(token).ConfigureAwait(false);
-            }
-            catch (Exception)
-            {
-                HoldOrDrop(taskDetails);
-                throw;
+                try
+                {
+                    await _concurrencySemaphore.WaitAsync(token).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    HoldOrDrop(taskDetails);
+                    throw;
+                }
             }
 
             bool interrupted = false;
@@ -1171,18 +1322,21 @@ namespace TaskHandler
                 if (token.IsCancellationRequested)
                 {
                     interrupted = true;
-                    _concurrencySemaphore.Release();
+                    ReleaseSlot();
                 }
                 else if (taskDetails.Token.IsCancellationRequested)
                 {
                     canceledBeforeStart = true;
-                    _concurrencySemaphore.Release();
+                    ReleaseSlot();
+                }
+                else if (!TryLeaveQueue(taskDetails))
+                {
+                    // Already settled elsewhere (dropped); nothing to start.
+                    ReleaseSlot();
+                    return;
                 }
                 else
                 {
-                    Interlocked.Decrement(ref _queuedCount);
-                    RemovePending(taskDetails);
-
                     // Track timing
                     taskDetails.StartedAt = DateTime.UtcNow;
                     _LastTaskStarted = taskDetails.StartedAt;
@@ -1234,8 +1388,7 @@ namespace TaskHandler
 
         private void CompleteCanceledBeforeStart(TaskDetails taskDetails)
         {
-            Interlocked.Decrement(ref _queuedCount);
-            RemovePending(taskDetails);
+            if (!TryLeaveQueue(taskDetails)) return;
             TaskHandlerTelemetry.TaskStarting(_Name, taskDetails, _MaxConcurrentTasks);
             Activity.Current = null;
             taskDetails.Task = Task.FromCanceled(taskDetails.Token);
@@ -1247,19 +1400,18 @@ namespace TaskHandler
             bool drop;
             lock (_StateLock)
             {
-                drop = _IsDisposed;
-                if (drop)
+                if (_IsDisposed)
                 {
-                    Interlocked.Decrement(ref _queuedCount);
-                    RemovePending(taskDetails);
+                    drop = TryLeaveQueue(taskDetails);
                 }
                 else
                 {
+                    drop = false;
                     _HeldTask = taskDetails;
                 }
             }
 
-            if (drop) CompleteDropped(taskDetails);
+            if (drop) CompleteDropped(taskDetails, TaskHandlerTelemetryNames.ErrorQueueClosed);
         }
 
         private TaskDetails TakeHeldTask()
@@ -1272,10 +1424,10 @@ namespace TaskHandler
             }
         }
 
-        private void CompleteDropped(TaskDetails taskDetails)
+        private void CompleteDropped(TaskDetails taskDetails, string errorType)
         {
-            Logger?.Invoke(_Header + "task " + taskDetails.Guid.ToString() + " dropped, queue disposed before it started");
-            TaskHandlerTelemetry.TaskDropped(_Name, taskDetails, TaskHandlerTelemetryNames.ErrorQueueClosed);
+            Logger?.Invoke(_Header + "task " + taskDetails.Guid.ToString() + " dropped before it started (" + errorType + ")");
+            TaskHandlerTelemetry.TaskDropped(_Name, taskDetails, errorType);
             Interlocked.Increment(ref _TotalCanceled);
             InvokeAbandoned(taskDetails);
             SafeInvokeEvent(OnTaskCanceled, nameof(OnTaskCanceled), taskDetails);
@@ -1337,7 +1489,7 @@ namespace TaskHandler
             finally
             {
                 // Release semaphore slot for next task
-                if (releaseSlot) _concurrencySemaphore.Release();
+                if (releaseSlot) ReleaseSlot();
             }
         }
 

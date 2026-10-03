@@ -99,6 +99,74 @@ namespace Test.Shared
                         queue.Stop();
                     }
                 })
+,
+
+                TaskHandlerSuites.Case(Id, "MaxConcurrentRaisedAtRuntime", "Raising MaxConcurrentTasks on a running queue lets waiting tasks start immediately", async ct =>
+                {
+                    TaskCompletionSource<bool> gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    using (TaskQueue queue = new TaskQueue(maxConcurrentTasks: 1))
+                    {
+                        queue.Start();
+                        for (int i = 0; i < 3; i++) await queue.EnqueueAsync("g" + i, async token => await gate.Task);
+                        Check.True(await Check.WaitUntilAsync(() => queue.RunningCount == 1), "one running at limit 1");
+                        queue.MaxConcurrentTasks = 3;
+                        Check.True(await Check.WaitUntilAsync(() => queue.RunningCount == 3), "three running after raising the limit");
+                        gate.SetResult(true);
+                        await queue.WaitForCompletionAsync();
+                    }
+                }),
+
+                TaskHandlerSuites.Case(Id, "MaxConcurrentLoweredAtRuntime", "Lowering MaxConcurrentTasks never interrupts running tasks and applies as they finish", async ct =>
+                {
+                    TaskCompletionSource<bool> gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    int current = 0;
+                    int peakAfterLowering = 0;
+                    using (TaskQueue queue = new TaskQueue(maxConcurrentTasks: 3))
+                    {
+                        queue.Start();
+                        for (int i = 0; i < 3; i++) await queue.EnqueueAsync("g" + i, async token => await gate.Task);
+                        Check.True(await Check.WaitUntilAsync(() => queue.RunningCount == 3), "three running");
+                        for (int i = 0; i < 3; i++)
+                        {
+                            await queue.EnqueueAsync("late" + i, async token =>
+                            {
+                                int now = Interlocked.Increment(ref current);
+                                lock (gate) { peakAfterLowering = Math.Max(peakAfterLowering, now); }
+                                await Task.Delay(40);
+                                Interlocked.Decrement(ref current);
+                            });
+                        }
+
+                        queue.MaxConcurrentTasks = 1;
+                        Check.Equal(3, queue.RunningCount, "running tasks are not interrupted");
+                        gate.SetResult(true);
+                        await queue.WaitForCompletionAsync();
+                        Check.Equal(1, peakAfterLowering, "later tasks ran one at a time");
+                    }
+                }),
+
+                TaskHandlerSuites.Case(Id, "MaxQueueSizeAppliesBeforeUse", "Setting MaxQueueSize before first use bounds the queue", async ct =>
+                {
+                    using (TaskQueue queue = new TaskQueue())
+                    {
+                        queue.MaxQueueSize = 1;
+                        queue.AddTask(Guid.NewGuid(), "a", null, token => Task.CompletedTask);
+                        Check.Throws<InvalidOperationException>(() => queue.AddTask(Guid.NewGuid(), "b", null, token => Task.CompletedTask), "second add rejected by the new bound");
+                    }
+                    await Task.CompletedTask;
+                }),
+
+                TaskHandlerSuites.Case(Id, "MaxQueueSizeLockedAfterUse", "Changing MaxQueueSize after the queue was used throws, and re-setting the same value does not", async ct =>
+                {
+                    using (TaskQueue queue = new TaskQueue(maxConcurrentTasks: 4, maxQueueSize: 10))
+                    {
+                        queue.AddTask(Guid.NewGuid(), "a", null, token => Task.CompletedTask);
+                        Check.Throws<InvalidOperationException>(() => queue.MaxQueueSize = 20, "change after use");
+                        queue.MaxQueueSize = 10;
+                        Check.Equal(10, queue.MaxQueueSize, "unchanged");
+                    }
+                    await Task.CompletedTask;
+                })
             };
 
             return new TestSuiteDescriptor(Id, "Property Validation", cases);

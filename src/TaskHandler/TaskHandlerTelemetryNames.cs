@@ -274,8 +274,10 @@ namespace TaskHandler
         public const string OutcomeCanceled = "canceled";
 
         /// <summary>
-        /// Outcome value: the task was accepted but never ran because the queue was disposed first. Tasks still queued
-        /// when the queue is stopped are retained for the next start and are not dropped.
+        /// Outcome value: the task was accepted but never ran, because the queue was disposed first (error.type
+        /// queue_closed) or a QoSKit scheduler evicted it to make room under its DropOldest policy (error.type
+        /// queue_full). Tasks still queued when the queue is stopped are retained for the next start and are not
+        /// dropped.
         /// </summary>
         public const string OutcomeDropped = "dropped";
 
@@ -330,7 +332,8 @@ namespace TaskHandler
         public const string LifecycleDispose = "dispose";
 
         /// <summary>
-        /// Error type value: a bounded queue was full.
+        /// Error type value: a bounded queue was full, so an enqueue attempt was rejected or (under a QoSKit
+        /// DropOldest policy) a queued task was evicted.
         /// </summary>
         public const string ErrorQueueFull = "queue_full";
 
@@ -338,6 +341,12 @@ namespace TaskHandler
         /// Error type value: the queue was disposed, so an enqueue attempt was rejected or a queued task was dropped.
         /// </summary>
         public const string ErrorQueueClosed = "queue_closed";
+
+        /// <summary>
+        /// Error type value: a QoSKit scheduler could not classify the task (for example, an unknown flow or class
+        /// key under a reject policy), so the enqueue attempt was rejected.
+        /// </summary>
+        public const string ErrorUnclassified = "unclassified";
 
         #endregion
     }

@@ -1,6 +1,27 @@
 # Change Log
 
-## v2.3.0 (Current)
+## v2.4.0 (Current)
+
+Opt-in QoS scheduling. FIFO remains the default and is unchanged.
+
+**Scheduling:**
+- New `TaskQueue(IQoSQueue<TaskDetails> scheduler, int maxConcurrentTasks = 32)` constructor and `TaskQueueOptions.Scheduler` let a [QoSKit](https://github.com/jchristn/QoSKit) queue decide which waiting task starts next: strict priority with optional aging (`PriorityQoSQueue`), weighted fairness per tenant (`WeightedFairQoSQueue`), class-based, low-latency, or weighted round robin. With a scheduler, the runner waits for a free slot before asking for the next task, so urgent work added behind a busy queue starts next
+- The scheduler's `MaxDepth`/`OverflowPolicy` provide capacity: `Reject`/`DropNewest` reject adds when full, `Block` makes `AddTaskAsync` wait, `DropOldest` evicts the oldest waiting task (completed as canceled and reported as `dropped`). Unclassifiable tasks are rejected (`error.type` `unclassified`)
+- New read-only `TaskQueue.Scheduler` property; `MaxQueueSize` reports the scheduler's `MaxDepth` and cannot be combined with a scheduler
+- New dependency: `QoSKit` 0.2.1 (exact version pin, because QoSKit is pre-1.0)
+
+**Fixes:**
+- `MaxConcurrentTasks` can now actually be changed on a live queue. The setter previously updated the reported value only; the concurrency limit stayed at its constructor value. Raising it starts waiting tasks immediately; lowering it never interrupts running tasks and applies as they finish
+- `MaxQueueSize` changed after the queue was created was silently ignored. It now applies when set before the queue is first started or given a task, and throws `InvalidOperationException` afterwards (the queue cannot be resized)
+- `new TaskQueue((TaskQueueOptions)null)` now throws `ArgumentNullException` instead of `NullReferenceException`
+
+**Telemetry:**
+- New `error.type` value `unclassified` (`TaskHandlerTelemetryNames.ErrorUnclassified`); `dropped` now also covers scheduler evictions (`error.type` `queue_full`). With a scheduler, wait time is reported in `stage:queued` and `stage:slot_wait` is near zero (see TELEMETRY.md)
+
+**Testing:**
+- New Scheduling suite (FIFO default, priority order, overtaking a backlog, FIFO within a priority, weighted fairness, unclassified rejection, Reject/Block/DropOldest/DropNewest, stop/restart and dispose with a scheduler, validation, capacity gauge) and runtime `MaxConcurrentTasks`/`MaxQueueSize` cases; 172 cases total
+
+## v2.3.0
 
 Lifecycle fixes. `Stop()` now pauses the queue instead of half-closing it, `Dispose()` settles every task, and events fire once per task. Review the behavior changes below if you depend on the old event timing.
 

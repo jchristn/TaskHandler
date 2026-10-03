@@ -159,6 +159,7 @@
         private Func<CancellationToken, Task> _Function = null;
         private CancellationTokenSource _TokenSource = new CancellationTokenSource();
         private Dictionary<string, object> _Metadata = new Dictionary<string, object>(StringComparer.InvariantCultureIgnoreCase);
+        private int _LeftQueue = 0;
 
         #endregion
 
@@ -170,6 +171,20 @@
         public TaskDetails()
         {
             Token = TokenSource.Token;
+        }
+
+        #endregion
+
+        #region Internal-Methods
+
+        /// <summary>
+        /// Claim the right to settle this task's departure from the queue (start, cancel before start, or drop).
+        /// Thread-safe; returns true exactly once.
+        /// </summary>
+        /// <returns>True for the first caller only.</returns>
+        internal bool TryClaim()
+        {
+            return Interlocked.Exchange(ref _LeftQueue, 1) == 0;
         }
 
         #endregion

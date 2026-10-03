@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<Version>2.3.0</Version>
+		<Version>2.4.0</Version>
 		<TargetFrameworks>netstandard2.0;netstandard2.1;net8.0;net10.0</TargetFrameworks>
 		<LangVersion>9.0</LangVersion>
 		<ApplicationIcon>logo.ico</ApplicationIcon>
@@ -16,8 +16,8 @@
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 		<RepositoryUrl>https://github.com/jchristn/TaskHandler</RepositoryUrl>
 		<RepositoryType>github</RepositoryType>
-		<PackageTags>task queue work scheduler telemetry opentelemetry metrics tracing</PackageTags>
-		<PackageReleaseNotes>v2.3.0: Lifecycle fixes. Stop() retains unstarted tasks (they run after the next Start()) and tasks can be added while stopped; Dispose() completes every unstarted task as canceled (handles canceled, OnTaskCanceled fired) instead of hanging; each task raises exactly one terminal event; OnProcessingStopped fires once; Stop(guid) cancels queued tasks; adding after dispose throws ObjectDisposedException; StopAsync(waitForCompletion) and IsRunning fixed; fixed a hang when disposing with a task waiting for a slot. v2.2.0: Added built-in observability. TaskQueue and TaskRunWithTimeout emit OpenTelemetry-shaped metrics and traces through the BCL Meter and ActivitySource named TaskHandler (queue depth, concurrency in use, per-stage durations, outcomes, rejections, cancellations, errors by type), with trace context propagated from enqueue into task code. New TaskQueue.Name and TaskQueueOptions.Name label each queue. No new runtime dependency on net8.0+; netstandard targets add System.Diagnostics.DiagnosticSource. See TELEMETRY.md. v2.1.1: Fixed result-returning EnqueueAsync&lt;T&gt; overloads so that a task exceeding its timeout completes the TaskHandle&lt;T&gt; with a TimeoutException (previously it double-completed the handle, surfacing a cancellation plus an InvalidOperationException fault). Hardened TaskHandle&lt;T&gt; completion to be idempotent. Updated System.Threading.Channels and Microsoft.Bcl.AsyncInterfaces to 10.0.11. v2.1.0: Retargeted to net8.0 and net10.0 (dropped net6.0); still supports netstandard2.0 and netstandard2.1. v2.0.0: Event-driven architecture (10-100x faster), async API (StartAsync, StopAsync, DisposeAsync), task results (TaskHandle&lt;T&gt;), priorities, timeouts, statistics, progress reporting. BREAKING: Removed IterationDelayMs and QueuedTasks properties.</PackageReleaseNotes>
+		<PackageTags>task queue work scheduler priority qos fair-queuing telemetry opentelemetry metrics tracing</PackageTags>
+		<PackageReleaseNotes>v2.4.0: Opt-in QoS scheduling. FIFO stays the default; pass a QoSKit queue (TaskQueue(IQoSQueue&lt;TaskDetails&gt;) or TaskQueueOptions.Scheduler) to start tasks by strict priority with aging, weighted fairness per tenant, and other disciplines, with the scheduler providing capacity and overflow policy. MaxConcurrentTasks can now be changed on a live queue; MaxQueueSize changes after first use throw instead of being ignored. Adds a QoSKit dependency. v2.3.0: Lifecycle fixes. Stop() retains unstarted tasks (they run after the next Start()) and tasks can be added while stopped; Dispose() completes every unstarted task as canceled (handles canceled, OnTaskCanceled fired) instead of hanging; each task raises exactly one terminal event; OnProcessingStopped fires once; Stop(guid) cancels queued tasks; adding after dispose throws ObjectDisposedException; StopAsync(waitForCompletion) and IsRunning fixed; fixed a hang when disposing with a task waiting for a slot. v2.2.0: Added built-in observability. TaskQueue and TaskRunWithTimeout emit OpenTelemetry-shaped metrics and traces through the BCL Meter and ActivitySource named TaskHandler (queue depth, concurrency in use, per-stage durations, outcomes, rejections, cancellations, errors by type), with trace context propagated from enqueue into task code. New TaskQueue.Name and TaskQueueOptions.Name label each queue. No new runtime dependency on net8.0+; netstandard targets add System.Diagnostics.DiagnosticSource. See TELEMETRY.md. v2.1.1: Fixed result-returning EnqueueAsync&lt;T&gt; overloads so that a task exceeding its timeout completes the TaskHandle&lt;T&gt; with a TimeoutException (previously it double-completed the handle, surfacing a cancellation plus an InvalidOperationException fault). Hardened TaskHandle&lt;T&gt; completion to be idempotent. Updated System.Threading.Channels and Microsoft.Bcl.AsyncInterfaces to 10.0.11. v2.1.0: Retargeted to net8.0 and net10.0 (dropped net6.0); still supports netstandard2.0 and netstandard2.1. v2.0.0: Event-driven architecture (10-100x faster), async API (StartAsync, StopAsync, DisposeAsync), task results (TaskHandle&lt;T&gt;), priorities, timeouts, statistics, progress reporting. BREAKING: Removed IterationDelayMs and QueuedTasks properties.</PackageReleaseNotes>
 		<PackageLicenseFile>LICENSE.md</PackageLicenseFile>
 		<IncludeSymbols>True</IncludeSymbols>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
@@ -26,6 +26,10 @@
 
 	<ItemGroup>
 	  <Content Include="logo.ico" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <PackageReference Include="QoSKit" Version="[0.2.1]" />
 	</ItemGroup>
 
 	<ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0' OR '$(TargetFramework)' == 'netstandard2.1'">

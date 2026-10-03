@@ -33,6 +33,7 @@ namespace Test.Shared
             TaskProgressModelSuite.Build(),
             TaskDetailsSuite.Build(),
             TimeoutSuite.Build(),
+            SchedulerSuite.Build(),
             TelemetrySuite.Build()
         };
 

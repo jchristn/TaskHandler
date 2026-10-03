@@ -4,6 +4,111 @@
         <name>TaskHandler</name>
     </assembly>
     <members>
+        <member name="T:TaskHandler.ChannelTaskBuffer">
+            <summary>
+            Default FIFO buffer backed by a System.Threading.Channels channel. A bounded channel waits for space on
+            asynchronous writes and rejects synchronous writes when full.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.ChannelTaskBuffer.#ctor(System.Int32)">
+            <summary>
+            Instantiate.
+            </summary>
+            <param name="capacity">Maximum number of buffered tasks, or -1 for unbounded.</param>
+        </member>
+        <member name="P:TaskHandler.ChannelTaskBuffer.Capacity">
+            <inheritdoc/>
+        </member>
+        <member name="M:TaskHandler.ChannelTaskBuffer.TryWrite(TaskHandler.TaskDetails)">
+            <inheritdoc/>
+        </member>
+        <member name="M:TaskHandler.ChannelTaskBuffer.WriteAsync(TaskHandler.TaskDetails,System.Threading.CancellationToken)">
+            <inheritdoc/>
+        </member>
+        <member name="M:TaskHandler.ChannelTaskBuffer.ReadAsync(System.Threading.CancellationToken)">
+            <inheritdoc/>
+        </member>
+        <member name="M:TaskHandler.ChannelTaskBuffer.Close">
+            <inheritdoc/>
+        </member>
+        <member name="T:TaskHandler.QoSTaskBuffer">
+            <summary>
+            Buffer backed by a caller-supplied QoSKit queue, which decides the order in which tasks start (strict
+            priority, weighted fair queuing, and so on). An incoming task the QoSKit queue refuses (full under Reject or
+            DropNewest, or an unknown class) is reported to the writer as a rejection. An already-accepted task it
+            evicts (DropOldest) is reported through the drop callback so it can be completed.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.QoSTaskBuffer.#ctor(QoSKit.IQoSQueue{TaskHandler.TaskDetails},System.Action{TaskHandler.TaskDetails,System.String})">
+            <summary>
+            Instantiate.
+            </summary>
+            <param name="queue">QoSKit queue. Owned by this buffer from now on.</param>
+            <param name="onDropped">Invoked with the task and a bounded error type when the queue discards a task.</param>
+        </member>
+        <member name="P:TaskHandler.QoSTaskBuffer.Capacity">
+            <inheritdoc/>
+        </member>
+        <member name="P:TaskHandler.QoSTaskBuffer.Queue">
+            <summary>
+            The QoSKit queue.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.QoSTaskBuffer.TryWrite(TaskHandler.TaskDetails)">
+            <inheritdoc/>
+        </member>
+        <member name="M:TaskHandler.QoSTaskBuffer.WriteAsync(TaskHandler.TaskDetails,System.Threading.CancellationToken)">
+            <inheritdoc/>
+        </member>
+        <member name="M:TaskHandler.QoSTaskBuffer.ReadAsync(System.Threading.CancellationToken)">
+            <inheritdoc/>
+        </member>
+        <member name="M:TaskHandler.QoSTaskBuffer.Close">
+            <inheritdoc/>
+        </member>
+        <member name="T:TaskHandler.TaskBuffer">
+            <summary>
+            Holds tasks that have been accepted but not yet read by the task runner, and decides the order in which the
+            runner receives them. Writes after <see cref="M:TaskHandler.TaskBuffer.Close"/> fail; reads after close throw
+            <see cref="T:System.Threading.Channels.ChannelClosedException"/> once empty.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskBuffer.Capacity">
+            <summary>
+            Capacity reported for telemetry and <see cref="P:TaskHandler.TaskQueue.MaxQueueSize"/>. -1 for unbounded.
+            </summary>
+        </member>
+        <member name="M:TaskHandler.TaskBuffer.TryWrite(TaskHandler.TaskDetails)">
+            <summary>
+            Add a task without waiting.
+            </summary>
+            <param name="taskDetails">Task details.</param>
+            <returns>Null when accepted; otherwise the bounded error type of the rejection (queue_full,
+            queue_closed, or unclassified).</returns>
+        </member>
+        <member name="M:TaskHandler.TaskBuffer.WriteAsync(TaskHandler.TaskDetails,System.Threading.CancellationToken)">
+            <summary>
+            Add a task, waiting for space when the buffer is full and its policy is to wait.
+            </summary>
+            <param name="taskDetails">Task details.</param>
+            <param name="cancellationToken">Cancellation token.</param>
+            <returns>Null when accepted; otherwise the bounded error type of the rejection (queue_full or
+            unclassified). Throws <see cref="T:System.Threading.Channels.ChannelClosedException"/> when closed and
+            <see cref="T:System.OperationCanceledException"/> when the token is canceled.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskBuffer.ReadAsync(System.Threading.CancellationToken)">
+            <summary>
+            Wait for and remove the next task.
+            </summary>
+            <param name="cancellationToken">Cancellation token.</param>
+            <returns>Next task.</returns>
+        </member>
+        <member name="M:TaskHandler.TaskBuffer.Close">
+            <summary>
+            Stop accepting tasks, release any waiting writers, and return the tasks still held.
+            </summary>
+            <returns>Tasks still held.</returns>
+        </member>
         <member name="T:TaskHandler.TaskDetails">
             <summary>
             Task details.
@@ -107,6 +212,13 @@
             <summary>
             Instantiate.
             </summary>
+        </member>
+        <member name="M:TaskHandler.TaskDetails.TryClaim">
+            <summary>
+            Claim the right to settle this task's departure from the queue (start, cancel before start, or drop).
+            Thread-safe; returns true exactly once.
+            </summary>
+            <returns>True for the first caller only.</returns>
         </member>
         <member name="T:TaskHandler.TaskHandle`1">
             <summary>
@@ -559,8 +671,10 @@
         </member>
         <member name="F:TaskHandler.TaskHandlerTelemetryNames.OutcomeDropped">
             <summary>
-            Outcome value: the task was accepted but never ran because the queue was disposed first. Tasks still queued
-            when the queue is stopped are retained for the next start and are not dropped.
+            Outcome value: the task was accepted but never ran, because the queue was disposed first (error.type
+            queue_closed) or a QoSKit scheduler evicted it to make room under its DropOldest policy (error.type
+            queue_full). Tasks still queued when the queue is stopped are retained for the next start and are not
+            dropped.
             </summary>
         </member>
         <member name="F:TaskHandler.TaskHandlerTelemetryNames.OutcomeRejected">
@@ -615,12 +729,19 @@
         </member>
         <member name="F:TaskHandler.TaskHandlerTelemetryNames.ErrorQueueFull">
             <summary>
-            Error type value: a bounded queue was full.
+            Error type value: a bounded queue was full, so an enqueue attempt was rejected or (under a QoSKit
+            DropOldest policy) a queued task was evicted.
             </summary>
         </member>
         <member name="F:TaskHandler.TaskHandlerTelemetryNames.ErrorQueueClosed">
             <summary>
             Error type value: the queue was disposed, so an enqueue attempt was rejected or a queued task was dropped.
+            </summary>
+        </member>
+        <member name="F:TaskHandler.TaskHandlerTelemetryNames.ErrorUnclassified">
+            <summary>
+            Error type value: a QoSKit scheduler could not classify the task (for example, an unknown flow or class
+            key under a reject policy), so the enqueue attempt was rejected.
             </summary>
         </member>
         <member name="T:TaskHandler.TaskInfo">
@@ -735,6 +856,8 @@
         <member name="T:TaskHandler.TaskQueue">
             <summary>
             Task queue.
+            By default tasks start in the order they were added (FIFO). To start them by priority, weighted fairness, or
+            another discipline, construct the queue with a QoSKit scheduler (see <see cref="P:TaskHandler.TaskQueue.Scheduler"/>).
             Emits metrics and traces through the BCL Meter and ActivitySource named "TaskHandler"
             (see <see cref="T:TaskHandler.TaskHandlerTelemetryNames"/> and TELEMETRY.md). Emission is best-effort, never throws,
             and costs effectively nothing when no listener is subscribed.
@@ -749,13 +872,30 @@
         <member name="P:TaskHandler.TaskQueue.MaxConcurrentTasks">
             <summary>
             Maximum number of concurrent tasks.
+            Can be changed at any time. Raising it lets waiting tasks start immediately; lowering it never interrupts
+            running tasks, and takes full effect as they finish.
             Default: 32. Minimum: 1.
             </summary>
+            <exception cref="T:System.ArgumentOutOfRangeException">Thrown when set below 1.</exception>
         </member>
         <member name="P:TaskHandler.TaskQueue.MaxQueueSize">
             <summary>
-            Maximum queue size. -1 for unbounded.
-            Default: -1 (unbounded)
+            Maximum number of tasks that can wait to start. -1 for unbounded.
+            Can only be changed before the queue is first started or given a task; afterwards a different value
+            throws, because the existing queue cannot be resized. When the queue was created with a
+            <see cref="P:TaskHandler.TaskQueue.Scheduler"/>, this reports the scheduler's MaxDepth (-1 when unbounded) and cannot be set.
+            Default: -1 (unbounded).
+            </summary>
+            <exception cref="T:System.ArgumentOutOfRangeException">Thrown when set to 0 or below -1.</exception>
+            <exception cref="T:System.InvalidOperationException">Thrown when changed after the queue was started or given a
+            task, or when the queue uses a <see cref="P:TaskHandler.TaskQueue.Scheduler"/>.</exception>
+        </member>
+        <member name="P:TaskHandler.TaskQueue.Scheduler">
+            <summary>
+            The QoSKit queue that decides which waiting task starts next, or null when the queue uses the default FIFO
+            order. Set through the <see cref="M:TaskHandler.TaskQueue.#ctor(QoSKit.IQoSQueue{TaskHandler.TaskDetails},System.Int32)"/> constructor or
+            <see cref="P:TaskHandler.TaskQueueOptions.Scheduler"/>; the TaskQueue owns it and disposes it. Use it for inspection
+            (Count, Statistics) only: enqueuing or dequeuing on it directly bypasses the TaskQueue.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueue.Name">
@@ -845,16 +985,37 @@
         </member>
         <member name="M:TaskHandler.TaskQueue.#ctor(System.Int32,System.Int32)">
             <summary>
-            Instantiate.
+            Instantiate a queue that starts tasks in the order they were added (FIFO).
             </summary>
             <param name="maxConcurrentTasks">Maximum concurrent tasks. Default: 32. Minimum: 1.</param>
             <param name="maxQueueSize">Maximum queue size. -1 for unbounded. Default: -1.</param>
+            <exception cref="T:System.ArgumentOutOfRangeException">Thrown when maxConcurrentTasks is below 1, or maxQueueSize
+            is 0 or below -1.</exception>
+        </member>
+        <member name="M:TaskHandler.TaskQueue.#ctor(QoSKit.IQoSQueue{TaskHandler.TaskDetails},System.Int32)">
+            <summary>
+            Instantiate a queue whose start order is decided by a QoSKit scheduler, for example
+            <c>new PriorityQoSQueue&lt;TaskDetails&gt;(5, t =&gt; t.Priority)</c> to start lower
+            <see cref="P:TaskHandler.TaskDetails.Priority"/> values first.
+            The scheduler's MaxDepth and OverflowPolicy replace MaxQueueSize: Reject and DropNewest reject new tasks when
+            full, Block makes asynchronous adds wait for space, and DropOldest evicts the oldest waiting task (which
+            completes as canceled, like a task dropped by Dispose). The TaskQueue takes ownership of the scheduler and
+            disposes it; do not share it, enqueue to it directly, or enable QoSKit persistence on it.
+            </summary>
+            <param name="scheduler">QoSKit queue of TaskDetails. Must not be null, and must be empty.</param>
+            <param name="maxConcurrentTasks">Maximum concurrent tasks. Default: 32. Minimum: 1.</param>
+            <exception cref="T:System.ArgumentNullException">Thrown when scheduler is null.</exception>
+            <exception cref="T:System.ArgumentException">Thrown when scheduler already holds items.</exception>
+            <exception cref="T:System.ArgumentOutOfRangeException">Thrown when maxConcurrentTasks is below 1.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.#ctor(TaskHandler.TaskQueueOptions)">
             <summary>
             Instantiate with options.
             </summary>
             <param name="options">TaskQueue options.</param>
+            <exception cref="T:System.ArgumentNullException">Thrown when options is null.</exception>
+            <exception cref="T:System.ArgumentException">Thrown when options sets both a Scheduler and a MaxQueueSize, or the
+            Scheduler already holds items.</exception>
         </member>
         <member name="M:TaskHandler.TaskQueue.Create(System.Action{TaskHandler.TaskQueueOptions})">
             <summary>
@@ -1059,8 +1220,19 @@
         </member>
         <member name="P:TaskHandler.TaskQueueOptions.MaxQueueSize">
             <summary>
-            Maximum queue size. -1 for unbounded.
+            Maximum queue size. -1 for unbounded. Must stay -1 when <see cref="P:TaskHandler.TaskQueueOptions.Scheduler"/> is set (configure the
+            scheduler's MaxDepth instead).
             Default: -1 (unbounded). Minimum: -1 or greater than 0.
+            </summary>
+        </member>
+        <member name="P:TaskHandler.TaskQueueOptions.Scheduler">
+            <summary>
+            Optional QoSKit queue that decides which waiting task starts next, for example
+            <c>new PriorityQoSQueue&lt;TaskDetails&gt;(5, t =&gt; t.Priority)</c> for strict priority or a
+            WeightedFairQoSQueue keyed on task metadata for per-tenant fairness. Null (the default) starts tasks in the
+            order they were added (FIFO). The TaskQueue takes ownership of it; see
+            <see cref="M:TaskHandler.TaskQueue.#ctor(QoSKit.IQoSQueue{TaskHandler.TaskDetails},System.Int32)"/> for the rules.
+            Default: null.
             </summary>
         </member>
         <member name="P:TaskHandler.TaskQueueOptions.Name">

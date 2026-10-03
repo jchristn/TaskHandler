@@ -37,13 +37,13 @@ dotnet build -c Release
 
 ## Architecture
 
-**Current Version:** v2.3.0
+**Current Version:** v2.4.0
 
 The architecture has evolved significantly from v1.0.x:
 - **v1.0.x**: Polling-based with 100ms iteration delay
 - **v2.0.0**: Event-driven with Channels and Semaphores (10-100x performance improvement), includes statistics tracking and progress reporting
 
-This documentation describes the v2.x architecture (v2.2.0 adds built-in metrics and traces; see TELEMETRY.md; v2.3.0 fixes stop/restart/dispose semantics).
+This documentation describes the v2.x architecture (v2.2.0 adds built-in metrics and traces; see TELEMETRY.md; v2.3.0 fixes stop/restart/dispose semantics; v2.4.0 adds opt-in QoSKit scheduling).
 
 ### Core Components
 
@@ -107,6 +107,19 @@ This documentation describes the v2.x architecture (v2.2.0 adds built-in metrics
 - Metric labels must be bounded (`taskhandler.queue.name` from `TaskQueue.Name`, outcome, stage, `error.type`, ...);
   task ids and names go on spans only. Every new code path needs a metric and span plus a TelemetrySuite test
 
+**TaskBuffer / ChannelTaskBuffer / QoSTaskBuffer** (src/TaskHandler/*TaskBuffer.cs, internal)
+- `TaskBuffer` abstracts where accepted-but-unread tasks wait and in what order the runner receives them
+- `ChannelTaskBuffer` is the default FIFO (System.Threading.Channels). `QoSTaskBuffer` wraps a caller-supplied QoSKit
+  `IQoSQueue<TaskDetails>` (`TaskQueue.Scheduler`); the TaskQueue owns and disposes it
+- Writes return null or a bounded rejection reason (`queue_full`, `queue_closed`, `unclassified`). QoSKit raises
+  `ItemDropped` synchronously: `DropOldest` evictions are real drops (completed via `CompleteDropped`), while
+  `DropNewest`/unknown-class refuse the incoming task and surface as rejections
+- With a QoSKit buffer the runner acquires a concurrency slot BEFORE reading (`slotFirst`), so a later urgent task can
+  overtake; the FIFO path reads first and then waits (keeps `queued`/`slot_wait` stages distinct)
+- `TaskDetails.TryClaim()` guarantees exactly one path (start, cancel-before-start, drop) settles each task's
+  departure from the queue (`TryLeaveQueue`), which prevents double-counting between Dispose, evictions and the runner
+- QoSKit is pre-1.0: keep the package pinned to an exact version (`[0.2.1]`) and re-test on upgrade
+
 **TaskRunWithTimeout** (src/TaskHandler/TaskRunWithTimeout.cs)
 - Static utility class for running tasks with timeout constraints
 - Generic method: `Task<T> Go<T>(Task<T> task, int timeoutMs, CancellationTokenSource tokenSource)`
@@ -126,8 +139,12 @@ This documentation describes the v2.x architecture (v2.2.0 adds built-in metrics
 
 ### Stop / Restart / Dispose Semantics (v2.3.0)
 
-- The Channel lives for the queue's lifetime. `Stop()` never completes it; only `Dispose()` does (`TryComplete` then
-  drain). Tasks can be added while stopped. `SingleReader` is false because `Dispose()` drains concurrently
+- The buffer (`_Buffer`) lives for the queue's lifetime. `Stop()` never closes it; only `Dispose()` does
+  (`TaskBuffer.Close()`: complete/dispose, then return what is left). Tasks can be added while stopped. The channel's
+  `SingleReader` is false because `Dispose()` drains concurrently
+- `MaxConcurrentTasks` is live: the semaphore is created with maxCount `Int32.MaxValue`; raising releases slots,
+  lowering takes free slots immediately and records the rest as `_SlotDebt`, which `ReleaseSlot()` absorbs as running
+  tasks finish (never use a background waiter: it races the runner for freed slots). Always release via `ReleaseSlot()`. `MaxQueueSize` can only be changed before first use (`_InUse`)
 - `Stop()` cancels the runner token first, then running tasks. A task the runner had dequeued but not started is parked
   in `_HeldTask` (`HoldOrDrop`) and resumed first by the next runner, which awaits the previous runner before reading
 - `_PendingTasks` tracks accepted-but-unstarted tasks so `Stop(guid)` can cancel them; `QueuedCount` includes them
@@ -168,7 +185,7 @@ Testing is built on **[Touchstone](https://github.com/jchristn/touchstone)**, a 
 descriptor framework. Test cases are defined once and executed through multiple hosts.
 
 **Test.Shared** (src/Test.Shared) is the single source of truth for the test corpus. It exposes
-`TaskHandlerSuites.All`, a set of `TestSuiteDescriptor` objects containing 153 exhaustive positive and
+`TaskHandlerSuites.All`, a set of `TestSuiteDescriptor` objects containing 172 exhaustive positive and
 negative test cases organized into suites:
 - Construction & configuration (constructors, options, Create factory, validation)
 - Property validation
@@ -184,6 +201,7 @@ negative test cases organized into suites:
 - TaskInfo snapshots
 - TaskProgress and TaskDetails value objects
 - TaskRunWithTimeout
+- Scheduling (FIFO default and QoSKit schedulers: priority, fairness, capacity policies, eviction, validation)
 - Telemetry (metrics and spans for every inventory category and failure path, via the in-memory
   `TelemetryCapture` helper in src/Test.Shared/Telemetry)
 
