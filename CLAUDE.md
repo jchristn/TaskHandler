@@ -37,7 +37,7 @@ dotnet build -c Release
 
 ## Architecture
 
-**Current Version:** v2.4.0
+**Current Version:** v2.4.1
 
 The architecture has evolved significantly from v1.0.x:
 - **v1.0.x**: Polling-based with 100ms iteration delay
@@ -185,7 +185,7 @@ Testing is built on **[Touchstone](https://github.com/jchristn/touchstone)**, a 
 descriptor framework. Test cases are defined once and executed through multiple hosts.
 
 **Test.Shared** (src/Test.Shared) is the single source of truth for the test corpus. It exposes
-`TaskHandlerSuites.All`, a set of `TestSuiteDescriptor` objects containing 172 exhaustive positive and
+`TaskHandlerSuites.All`, a set of `TestSuiteDescriptor` objects containing 188 exhaustive positive and
 negative test cases organized into suites:
 - Construction & configuration (constructors, options, Create factory, validation)
 - Property validation
@@ -202,6 +202,11 @@ negative test cases organized into suites:
 - TaskProgress and TaskDetails value objects
 - TaskRunWithTimeout
 - Scheduling (FIFO default and QoSKit schedulers: priority, fairness, capacity policies, eviction, validation)
+- QoS disciplines (behavioral proof per discipline: WFQ ratios, aging with a manual clock and under a live stream,
+  CBWFQ, WRR, LLQ unpoliced/policed/throttled-only/stop/dispose, priority across slots, live limit changes).
+  Helpers live in src/Test.Shared/Scheduling: `StartLog` (thread-safe start order and times) and
+  `ManualTimeProvider` (deterministic QoSKit clock). Each discipline test must fail when its scheduler is
+  replaced by plain FIFO; re-run that mutation check when changing these tests
 - Telemetry (metrics and spans for every inventory category and failure path, via the in-memory
   `TelemetryCapture` helper in src/Test.Shared/Telemetry)
 

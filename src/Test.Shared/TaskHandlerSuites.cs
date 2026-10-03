@@ -34,6 +34,7 @@ namespace Test.Shared
             TaskDetailsSuite.Build(),
             TimeoutSuite.Build(),
             SchedulerSuite.Build(),
+            QoSDisciplinesSuite.Build(),
             TelemetrySuite.Build()
         };
 

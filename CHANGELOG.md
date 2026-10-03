@@ -1,6 +1,13 @@
 # Change Log
 
-## v2.4.0 (Current)
+## v2.4.1 (Current)
+
+No library code changes; this release ships the expanded test suite and documentation.
+
+**Testing:**
+- New QoS Disciplines suite (16 cases) proving each QoSKit discipline shapes start order through a TaskQueue: equal-weight and 3:1 weighted fair ratios, priority aging (deterministic with a manual clock, and under a continuous urgent stream), class-based fairness with `class-default`, weighted round robin ratios and unknown-key rejection, low-latency queuing (unpoliced priority first, policed priority not starving fair classes, throttled-only tasks waking on refill, stop and dispose while the runner waits on the policer without leaking a slot), priority across two concurrency slots, raising the limit with a scheduler, `Stop(guid)` on a scheduled task, and repeated live lowering of `MaxConcurrentTasks`. Each discipline test was mutation-checked to fail under plain FIFO; 188 cases total. No library changes
+
+## v2.4.0
 
 Opt-in QoS scheduling. FIFO remains the default and is unchanged.
 
