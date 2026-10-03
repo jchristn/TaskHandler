@@ -1,6 +1,19 @@
 # Change Log
 
-## v2.4.1 (Current)
+## v2.4.2 (Current)
+
+Dependency update; no library code changes.
+
+**Dependencies:**
+- `System.Threading.Channels` and `System.Diagnostics.DiagnosticSource` 10.0.11 -> 10.0.12 (netstandard2.0 and netstandard2.1)
+- `Microsoft.Bcl.AsyncInterfaces` 10.0.11 -> 10.0.12 (netstandard2.0)
+- `QoSKit` remains pinned to exactly 0.2.1 (latest)
+
+**Testing:**
+- Test hosts updated: `Touchstone.Core`/`Touchstone.Cli`/`Touchstone.XunitAdapter`/`Touchstone.NunitAdapter` 0.1.12 -> 0.2.0, `NUnit` 4.6.1 -> 5.0.0, `NUnit3TestAdapter` 6.2.0 -> 6.3.0, `Microsoft.NET.Test.Sdk` 18.9.0 -> 18.10.1; `RestWrapper` 3.2.0 -> 3.3.1 in the interactive HTTP tool
+- Made the "urgent task overtakes a running backlog" scheduling test deterministic: the running task now waits on a gate released after the urgent task is enqueued, instead of a 40 ms delay that could expire under load before the urgent task arrived (re-verified to fail under plain FIFO). 188 cases pass on net8.0 and net10.0 across all three hosts
+
+## v2.4.1
 
 No library code changes; this release ships the expanded test suite and documentation.
 

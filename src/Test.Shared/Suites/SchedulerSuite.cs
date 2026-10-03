@@ -61,10 +61,17 @@ namespace Test.Shared
                     List<string> order = new List<string>();
                     using (TaskQueue queue = new TaskQueue(new PriorityQoSQueue<TaskDetails>(5, t => t.Priority), maxConcurrentTasks: 1))
                     {
+                        TaskCompletionSource<bool> gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                         queue.Start();
-                        for (int i = 0; i < 4; i++) await EnqueueRecorded(queue, order, "low" + i, (int)TaskPriority.Low, 40);
+                        await queue.EnqueueAsync("low0", async token =>
+                        {
+                            lock (order) { order.Add("low0"); }
+                            await gate.Task.ConfigureAwait(false);
+                        }, priority: (int)TaskPriority.Low);
+                        for (int i = 1; i < 4; i++) await EnqueueRecorded(queue, order, "low" + i, (int)TaskPriority.Low);
                         Check.True(await Check.WaitUntilAsync(() => queue.RunningCount == 1), "backlog running");
                         await EnqueueRecorded(queue, order, "urgent", (int)TaskPriority.Urgent);
+                        gate.SetResult(true);
                         Check.True(await WaitForCount(order, 5), "all ran");
                         lock (order)
                         {

@@ -1294,7 +1294,7 @@ This ensures compatibility with:
 - Xamarin
 - Unity (2021.2+)
 
-Dependencies: [`QoSKit`](https://www.nuget.org/packages/QoSKit) on every target (used only when you pass a scheduler; the default FIFO path does not touch it), plus `System.Threading.Channels` and `System.Diagnostics.DiagnosticSource` on the netstandard targets (and `Microsoft.Bcl.AsyncInterfaces` on netstandard2.0).
+Dependencies: [`QoSKit`](https://www.nuget.org/packages/QoSKit) 0.2.1 on every target (used only when you pass a scheduler; the default FIFO path does not touch it), plus `System.Threading.Channels` and `System.Diagnostics.DiagnosticSource` 10.0.12 on the netstandard targets (and `Microsoft.Bcl.AsyncInterfaces` 10.0.12 on netstandard2.0).
 
 ## Testing
 

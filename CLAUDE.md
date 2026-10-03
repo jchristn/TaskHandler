@@ -37,7 +37,7 @@ dotnet build -c Release
 
 ## Architecture
 
-**Current Version:** v2.4.1
+**Current Version:** v2.4.2
 
 The architecture has evolved significantly from v1.0.x:
 - **v1.0.x**: Polling-based with 100ms iteration delay
